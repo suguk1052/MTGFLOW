@@ -26,6 +26,9 @@ parser.add_argument('--batch_norm', type=bool, default=False)
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
 
+# 🚀 [수정 포인트 1] 파더보른 하중 조건 폴더 지정을 위한 인자 추가
+parser.add_argument('--load_setting', type=str, default='N15_M07_F10', help='Paderborn operational setting directory')
+
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
 parser.add_argument('--window_size', type=int, default=60)
@@ -39,6 +42,9 @@ device = torch.device("cuda" if args.cuda else "cpu")
 save_path = os.path.join(args.output_dir,args.name)
 
 from Dataset import load_smd_smap_msl, loader_SWat, loader_WADI, loader_PSM, loader_WADI_OCC
+
+# 🚀 [수정 포인트 2] 우리가 작성한 파더보른 OCC 로더 함수 임포트
+from Dataset.paderborn import loader_Paderborn_OCC
 
 if args.name == 'SWaT':
     train_loader, val_loader, test_loader, n_sensor = loader_SWat(args.data_dir, \
@@ -56,7 +62,15 @@ elif args.name == 'PSM':
     train_loader, val_loader, test_loader, n_sensor = loader_PSM(args.name, \
                                                                 args.batch_size, args.window_size, args.stride_size, args.train_split)
 
-
+# 🚀 [수정 포인트 3] 쉘 스크립트에서 --name=paderborn 을 줬을 때 작동할 분기 연결
+elif args.name == 'paderborn':
+    train_loader, val_loader, test_loader, n_sensor = loader_Paderborn_OCC(
+        root="/home/dayoon/DCP/Data/Paderborn", 
+        loads=[args.load_setting], 
+        batch_size=args.batch_size,
+        window_size=args.window_size,
+        stride_size=args.stride_size
+    )
 
 #%%
 model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model = args.model, batch_norm=args.batch_norm)

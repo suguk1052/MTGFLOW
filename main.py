@@ -99,7 +99,7 @@ for seed in range(15, 20):
         os.makedirs(save_path)
 
 
-    loss_best = 100
+    loss_best = np.inf
     roc_max = 0
   
     lr = args.lr 
@@ -108,7 +108,6 @@ for seed in range(15, 20):
         ], lr=lr, weight_decay=0.0)
 
     for epoch in range(40):
-        print(epoch)
         loss_train = []
 
         model.train()
@@ -127,28 +126,48 @@ for seed in range(15, 20):
 
 
 
-        loss_test = []
-        with torch.no_grad():
-            for x, _, idx in test_loader:
+        if args.name == 'paderborn':
+            loss_val = []
+            model.eval()
+            with torch.no_grad():
+                for x, _, idx in val_loader:
+                    x = x.to(device)
+                    loss = -model.test(x, ).cpu().numpy()
+                    loss_val.append(loss)
+            loss_val = np.concatenate(loss_val)
+            mean_val_loss = np.mean(loss_val)
 
-                x = x.to(device)
-                loss = -model.test(x, ).cpu().numpy()
-                loss_test.append(loss)
-        loss_test = np.concatenate(loss_test)
+            if loss_best > mean_val_loss:
+                loss_best = mean_val_loss
+                torch.save({
+                'model': model.state_dict(),
+                }, f"{save_path}/model.pth")
+
+            log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Val Loss: {mean_val_loss:.4f} | Best Val Loss: {loss_best:.4f}"
+            print(log_string)
+        else:
+            loss_test = []
+            with torch.no_grad():
+                for x, _, idx in test_loader:
+
+                    x = x.to(device)
+                    loss = -model.test(x, ).cpu().numpy()
+                    loss_test.append(loss)
+            loss_test = np.concatenate(loss_test)
 
     
 
-        roc_test = roc_auc_score(np.asarray(test_loader.dataset.label, dtype=int), loss_test)
+            roc_test = roc_auc_score(np.asarray(test_loader.dataset.label, dtype=int), loss_test)
 
     
-        if roc_max < roc_test:
-            roc_max = roc_test
-            torch.save({
-            'model': model.state_dict(),
-            }, f"{save_path}/model.pth")
+            if roc_max < roc_test:
+                roc_max = roc_test
+                torch.save({
+                'model': model.state_dict(),
+                }, f"{save_path}/model.pth")
 
-        roc_max = max(roc_test, roc_max)
+            roc_max = max(roc_test, roc_max)
 
-        # 터미널 출력 포맷 수정
-        log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Test AUROC: {roc_test:.4f} | Best AUROC: {roc_max:.4f}"
-        print(log_string)
+            # 터미널 출력 포맷 수정
+            log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Test AUROC: {roc_test:.4f} | Best AUROC: {roc_max:.4f}"
+            print(log_string)

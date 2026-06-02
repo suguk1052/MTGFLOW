@@ -1,12 +1,11 @@
 #%%
 import os
 import argparse
-import csv
 import json
 import torch
 from models.MTGFLOW import MTGFLOW
 import numpy as np
-from sklearn.metrics import roc_auc_score, precision_recall_curve 
+from sklearn.metrics import roc_auc_score
 
 parser = argparse.ArgumentParser()
 
@@ -30,6 +29,7 @@ parser.add_argument('--stride_size', type=int, default=10)
 
 # 🚀 [수정 포인트 1] 파더보른 하중 조건 폴더 지정을 위한 인자 추가
 parser.add_argument('--load_setting', type=str, default='N15_M07_F10', help='Paderborn operational setting directory')
+parser.add_argument('--anomaly_ratio', type=float, default=1.0, help='Percentile ratio for label-free anomaly thresholding.')
 
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
@@ -84,60 +84,53 @@ model.load_state_dict(checkpoint['model'])
 
 model.eval()
 
-loss_test = []
-with torch.no_grad():
-    for x, _, _ in test_loader:
-        x = x.to(device)
-        loss = -model.test(x,).cpu().numpy()
-        loss_test.append(loss)
-loss_test = np.concatenate(loss_test)
+def compute_scores(loader):
+    scores = []
+    with torch.no_grad():
+        for x, _, _ in loader:
+            x = x.to(device)
+            loss = -model.test(x,).cpu().numpy()
+            scores.append(loss)
+    return np.concatenate(scores)
+
+loss_test = compute_scores(test_loader)
 test_labels = np.asarray(test_loader.dataset.label,dtype=int)
 roc_test = roc_auc_score(test_labels,loss_test)
 print("The ROC score on {} dataset is {}".format(args.name, roc_test))
 
 if args.name == 'paderborn':
-    precision, recall, thresholds = precision_recall_curve(test_labels, loss_test)
-    f1_scores = 2 * precision[:-1] * recall[:-1] / (precision[:-1] + recall[:-1] + 1e-12)
-    best_threshold = float(thresholds[np.argmax(f1_scores)])
-    predictions = (loss_test >= best_threshold).astype(int)
+    train_scores = compute_scores(train_loader)
+    threshold = float(np.percentile(
+        np.concatenate([train_scores, loss_test]),
+        100 - args.anomaly_ratio
+    ))
+    predictions = (loss_test >= threshold).astype(int)
+    overall_accuracy = float(np.mean(predictions == test_labels))
 
-    per_id_metrics = []
+    per_bearing_metrics = []
     test_ids = np.asarray(test_loader.dataset.ids)
     for bearing_id in sorted(np.unique(test_ids)):
         mask = test_ids == bearing_id
         labels = test_labels[mask]
-        scores = loss_test[mask]
         preds = predictions[mask]
         unique_labels = np.unique(labels)
-        id_auc = roc_auc_score(labels, scores) if len(unique_labels) > 1 else None
-        per_id_metrics.append({
+        per_bearing_metrics.append({
             'id': str(bearing_id),
             'label': int(unique_labels[0]) if len(unique_labels) == 1 else 'mixed',
             'num_windows': int(mask.sum()),
-            'mean_anomaly_score': float(np.mean(scores)),
-            'std_anomaly_score': float(np.std(scores)),
-            'min_anomaly_score': float(np.min(scores)),
-            'max_anomaly_score': float(np.max(scores)),
-            'predicted_anomaly_rate': float(np.mean(preds)),
-            'accuracy_at_best_f1_threshold': float(np.mean(preds == labels)),
-            'auroc': float(id_auc) if id_auc is not None else None,
+            'accuracy': float(np.mean(preds == labels)),
         })
 
     metrics = {
-        'dataset': args.name,
-        'load_setting': args.load_setting,
         'overall_auroc': float(roc_test),
-        'best_f1_threshold': best_threshold,
-        'per_id': per_id_metrics,
+        'threshold': threshold,
+        'anomaly_ratio': float(args.anomaly_ratio),
+        'overall_accuracy': overall_accuracy,
+        'total_windows': int(len(loss_test)),
+        'per_bearing': per_bearing_metrics,
     }
 
-    json_path = os.path.join(save_path, 'paderborn_per_id_metrics.json')
-    csv_path = os.path.join(save_path, 'paderborn_per_id_metrics.csv')
+    json_path = os.path.join(save_path, 'paderborn_per_bearing_metrics.json')
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
-    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-        fieldnames = list(per_id_metrics[0].keys())
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(per_id_metrics)
-    print(f"Saved Paderborn per-id metrics to {json_path} and {csv_path}")
+    print(f"Saved Paderborn per-bearing metrics to {json_path}")

@@ -90,8 +90,8 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     scaler.fit(np.concatenate(raw_train_signals).reshape(-1, 1))
 
     def extract_bearing_id(filename):
-        match = re.search(r'K(?:[AI])?\d{2,3}', filename)
-        return match.group(0) if match else filename.replace('.mat', '')
+        match = re.search(r'(K[A-Z]?\d{2,3})(?:_|\.)', filename)
+        return match.group(1) if match else filename.replace('.mat', '')
 
     # 🚀 Step 3: 파일 경계면 브레이크 없이 윈도우를 추출하는 내부 헬퍼 함수
     def extract_scaled_windows(file_tuple_list):

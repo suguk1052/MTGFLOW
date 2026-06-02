@@ -42,7 +42,7 @@ args.cuda = torch.cuda.is_available()
 device = torch.device("cuda" if args.cuda else "cpu")
 
 
-for seed in range(15, 20):
+for seed in [2026]:
     args.seed = seed
     print(args)
     import random

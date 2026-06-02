@@ -6,16 +6,18 @@
 import os
 import numpy as np
 import scipy.io
+import re
 import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
 class Paderborn_dataset(Dataset):
-    def __init__(self, windows, labels, window_size) -> None:
+    def __init__(self, windows, labels, window_size, ids=None) -> None:
         super(Paderborn_dataset, self).__init__()
         self.windows = windows  
         self.label = labels     
         self.window_size = window_size
+        self.ids = np.array(ids) if ids is not None else np.array(['unknown'] * len(windows))
 
     def __len__(self):
         return len(self.windows)
@@ -87,10 +89,16 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     scaler = StandardScaler()
     scaler.fit(np.concatenate(raw_train_signals).reshape(-1, 1))
 
+    def extract_bearing_id(filename):
+        match = re.search(r'K(?:[AI])?\d{2,3}', filename)
+        return match.group(0) if match else filename.replace('.mat', '')
+
     # 🚀 Step 3: 파일 경계면 브레이크 없이 윈도우를 추출하는 내부 헬퍼 함수
     def extract_scaled_windows(file_tuple_list):
         extracted_windows = []
+        extracted_ids = []
         for folder_path, f in file_tuple_list:
+            bearing_id = extract_bearing_id(f)
             mat = scipy.io.loadmat(os.path.join(folder_path, f))
             key = f.replace('.mat', '')
             sig = None
@@ -109,17 +117,19 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
             start = 0
             while start + window_size <= len(scaled_sig):
                 extracted_windows.append(scaled_sig[start:start + window_size])
+                extracted_ids.append(bearing_id)
                 start += stride_size
                 
-        return np.array(extracted_windows)
+        return np.array(extracted_windows), np.array(extracted_ids)
 
     # 🚀 Step 4: 멀티 도메인 데이터셋 윈도우 가공 및 빌딩
-    train_x = extract_scaled_windows(train_file_tuples)
-    val_x = extract_scaled_windows(val_file_tuples)
-    test_norm_x = extract_scaled_windows(test_normal_file_tuples)
-    test_fault_x = extract_scaled_windows(test_fault_file_tuples)
+    train_x, train_ids_per_window = extract_scaled_windows(train_file_tuples)
+    val_x, val_ids_per_window = extract_scaled_windows(val_file_tuples)
+    test_norm_x, test_norm_ids_per_window = extract_scaled_windows(test_normal_file_tuples)
+    test_fault_x, test_fault_ids_per_window = extract_scaled_windows(test_fault_file_tuples)
 
     test_x = np.concatenate([test_norm_x, test_fault_x], axis=0)
+    test_ids_per_window = np.concatenate([test_norm_ids_per_window, test_fault_ids_per_window], axis=0)
     
     # 이진 라벨 정의 (정상 0, 이상 1)
     train_y = np.zeros(len(train_x))
@@ -132,9 +142,9 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     print(f'   - Total Train Windows: {len(train_x)} | Val Windows: {len(val_x)} | Test Windows: {len(test_x)}')
 
     # 파이토치 데이터로더 패킹 및 반환
-    train_loader = DataLoader(Paderborn_dataset(train_x, train_y, window_size), batch_size=batch_size, shuffle=not label)
-    val_loader = DataLoader(Paderborn_dataset(val_x, val_y, window_size), batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(Paderborn_dataset(test_x, test_y, window_size), batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(Paderborn_dataset(train_x, train_y, window_size, train_ids_per_window), batch_size=batch_size, shuffle=not label)
+    val_loader = DataLoader(Paderborn_dataset(val_x, val_y, window_size, val_ids_per_window), batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(Paderborn_dataset(test_x, test_y, window_size, test_ids_per_window), batch_size=batch_size, shuffle=False)
 
     return train_loader, val_loader, test_loader, n_sensor
 

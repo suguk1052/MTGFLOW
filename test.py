@@ -29,6 +29,9 @@ parser.add_argument('--stride_size', type=int, default=10)
 
 # 🚀 [수정 포인트 1] 파더보른 하중 조건 폴더 지정을 위한 인자 추가
 parser.add_argument('--load_setting', type=str, default='N15_M07_F10', help='Paderborn operational setting directory')
+parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], help='Paderborn normal bearing IDs for training.')
+parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
+parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
 parser.add_argument('--threshold_percentile', type=float, default=95, help='Percentile of validation normal scores for label-free thresholding.')
 
 parser.add_argument('--batch_size', type=int, default=512)
@@ -71,7 +74,10 @@ elif args.name == 'paderborn':
         loads=[args.load_setting], 
         batch_size=args.batch_size,
         window_size=args.window_size,
-        stride_size=args.stride_size
+        stride_size=args.stride_size,
+        train_ids=args.train_ids,
+        val_ids=args.val_ids,
+        test_norm_ids=args.test_norm_ids
     )
 
 #%%
@@ -119,6 +125,24 @@ if args.name == 'paderborn':
         })
 
     metrics = {
+        'paderborn_config': {
+            'root': '/home/dayoon/DCP/Data/Paderborn',
+            'loads': [args.load_setting],
+            'batch_size': int(args.batch_size),
+            'window_size': int(args.window_size),
+            'stride_size': int(args.stride_size),
+            'train_ids': list(args.train_ids),
+            'val_ids': list(args.val_ids),
+            'test_norm_ids': list(args.test_norm_ids),
+        },
+        'model_config': {
+            'model': args.model,
+            'n_blocks': int(args.n_blocks),
+            'hidden_size': int(args.hidden_size),
+            'n_hidden': int(args.n_hidden),
+            'input_size': int(args.input_size),
+            'batch_norm': bool(args.batch_norm),
+        },
         'overall_auroc': float(roc_test),
         'threshold': threshold,
         'threshold_percentile': float(args.threshold_percentile),

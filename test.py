@@ -29,7 +29,7 @@ parser.add_argument('--stride_size', type=int, default=10)
 
 # 🚀 [수정 포인트 1] 파더보른 하중 조건 폴더 지정을 위한 인자 추가
 parser.add_argument('--load_setting', type=str, default='N15_M07_F10', help='Paderborn operational setting directory')
-parser.add_argument('--anomaly_ratio', type=float, default=1.0, help='Percentile ratio for label-free anomaly thresholding.')
+parser.add_argument('--threshold_percentile', type=float, default=95, help='Percentile of validation normal scores for label-free thresholding.')
 
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
@@ -99,11 +99,8 @@ roc_test = roc_auc_score(test_labels,loss_test)
 print("The ROC score on {} dataset is {}".format(args.name, roc_test))
 
 if args.name == 'paderborn':
-    train_scores = compute_scores(train_loader)
-    threshold = float(np.percentile(
-        np.concatenate([train_scores, loss_test]),
-        100 - args.anomaly_ratio
-    ))
+    val_scores = compute_scores(val_loader)
+    threshold = float(np.percentile(val_scores, args.threshold_percentile))
     predictions = (loss_test >= threshold).astype(int)
     overall_accuracy = float(np.mean(predictions == test_labels))
 
@@ -124,7 +121,7 @@ if args.name == 'paderborn':
     metrics = {
         'overall_auroc': float(roc_test),
         'threshold': threshold,
-        'anomaly_ratio': float(args.anomaly_ratio),
+        'threshold_percentile': float(args.threshold_percentile),
         'overall_accuracy': overall_accuracy,
         'total_windows': int(len(loss_test)),
         'per_bearing': per_bearing_metrics,

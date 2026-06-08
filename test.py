@@ -32,7 +32,7 @@ parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='
 parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], help='Paderborn normal bearing IDs for training.')
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
-parser.add_argument('--threshold_percentile', type=float, default=95, help='Percentile of validation normal scores for label-free thresholding.')
+parser.add_argument('--threshold_percentile', type=float, default=95, help='Percentile of train+validation normal scores for label-free thresholding.')
 
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
@@ -105,8 +105,10 @@ roc_test = roc_auc_score(test_labels,loss_test)
 print("The ROC score on {} dataset is {}".format(args.name, roc_test))
 
 if args.name == 'paderborn':
+    train_scores = compute_scores(train_loader)
     val_scores = compute_scores(val_loader)
-    threshold = float(np.percentile(val_scores, args.threshold_percentile))
+    threshold_reference_scores = np.concatenate([train_scores, val_scores])
+    threshold = float(np.percentile(threshold_reference_scores, args.threshold_percentile))
     predictions = (loss_test >= threshold).astype(int)
     overall_accuracy = float(np.mean(predictions == test_labels))
 
@@ -146,6 +148,8 @@ if args.name == 'paderborn':
         'overall_auroc': float(roc_test),
         'threshold': threshold,
         'threshold_percentile': float(args.threshold_percentile),
+        'threshold_reference': 'train+val',
+        'threshold_reference_windows': int(len(threshold_reference_scores)),
         'overall_accuracy': overall_accuracy,
         'total_windows': int(len(loss_test)),
         'per_bearing': per_bearing_metrics,

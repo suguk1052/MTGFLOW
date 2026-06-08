@@ -28,7 +28,7 @@ parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
 
 # 🚀 [수정 포인트 1] 파더보른 하중 조건 폴더 지정을 위한 인자 추가
-parser.add_argument('--load_setting', type=str, default='N15_M07_F10', help='Paderborn operational setting directory')
+parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='Paderborn operational setting directories')
 parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], help='Paderborn normal bearing IDs for training.')
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
@@ -83,7 +83,7 @@ for seed in [2026]:
     elif args.name == 'paderborn':
         train_loader, val_loader, test_loader, n_sensor = loader_Paderborn_OCC(
             root="/home/dayoon/DCP/Data/Paderborn",
-            loads=[args.load_setting],               # 스크립트에서 넘겨받은 하중 조건 세팅 주입
+            loads=args.load_setting,               # 스크립트에서 넘겨받은 하중 조건 세팅 주입
             batch_size=args.batch_size,
             window_size=args.window_size,
             stride_size=args.stride_size,

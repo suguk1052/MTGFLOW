@@ -1,12 +1,7 @@
 #!/bin/bash
-# Usage: bash runners/run_Paderborn_1_test.sh <run_name>
 
-if [ -z "$1" ]; then
-    echo "Usage: bash runners/run_Paderborn_1_test.sh <run_name>" >&2
-    exit 1
-fi
-
-RUN_NAME="$1"
+# Change RUN_NAME to the checkpoint folder name you want to evaluate.
+RUN_NAME="S0_A_raw_ch1_win2048"
 
 CUDA_VISIBLE_DEVICES=0 python3 test.py \
     --name=paderborn \

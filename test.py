@@ -37,6 +37,7 @@ parser.add_argument('--threshold_percentile', type=float, default=95, help='Perc
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
 parser.add_argument('--window_size', type=int, default=60)
+parser.add_argument('--raw_window_size', type=int, default=2048, help='Paderborn raw waveform window size before FFT.')
 parser.add_argument('--lr', type=float, default=2e-3, help='Learning rate.')
 
 
@@ -75,10 +76,12 @@ elif args.name == 'paderborn':
         batch_size=args.batch_size,
         window_size=args.window_size,
         stride_size=args.stride_size,
+        raw_window_size=args.raw_window_size,
         train_ids=args.train_ids,
         val_ids=args.val_ids,
         test_norm_ids=args.test_norm_ids
     )
+    args.window_size = train_loader.dataset.window_size
 
 #%%
 model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model = args.model, batch_norm=args.batch_norm)
@@ -130,6 +133,7 @@ if args.name == 'paderborn':
             'loads': list(args.load_setting),
             'batch_size': int(args.batch_size),
             'window_size': int(args.window_size),
+            'raw_window_size': int(args.raw_window_size),
             'stride_size': int(args.stride_size),
             'train_ids': list(args.train_ids),
             'val_ids': list(args.val_ids),

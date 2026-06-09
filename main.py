@@ -25,22 +25,35 @@ parser.add_argument('--n_hidden', type=int, default=1, help='Number of hidden la
 parser.add_argument('--input_size', type=int, default=1)
 parser.add_argument('--batch_norm', type=bool, default=False)
 parser.add_argument('--train_split', type=float, default=0.6)
-parser.add_argument('--stride_size', type=int, default=10)
+parser.add_argument('--stride_size', type=int, default=None)
 
 # 🚀 [수정 포인트 1] 파더보른 하중 조건 폴더 지정을 위한 인자 추가
 parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='Paderborn operational setting directories')
 parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], help='Paderborn normal bearing IDs for training.')
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
+parser.add_argument('--exclude_ids', nargs='+', default=[], help='Paderborn bearing IDs to exclude from all splits, e.g. K006.')
+parser.add_argument('--sampling_rate', type=int, default=64000, help='Paderborn vibration_1 sampling rate in Hz.')
+parser.add_argument('--n_bands', type=int, default=8, help='Number of Paderborn bandpass vibration channels.')
 
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
-parser.add_argument('--window_size', type=int, default=60)
+parser.add_argument('--window_size', type=int, default=None)
 parser.add_argument('--lr', type=float, default=2e-3, help='Learning rate.')
 
 
 
-args = parser.parse_known_args()[0]
+args, unknown_args = parser.parse_known_args()
+if unknown_args:
+    raise ValueError(f"Unknown command line arguments: {unknown_args}")
+if args.window_size is None:
+    args.window_size = 2048 if args.name == 'paderborn' else 60
+if args.stride_size is None:
+    args.stride_size = 1024 if args.name == 'paderborn' else 10
+exclude_id_set = set(args.exclude_ids)
+args.train_ids = [bearing_id for bearing_id in args.train_ids if bearing_id not in exclude_id_set]
+args.val_ids = [bearing_id for bearing_id in args.val_ids if bearing_id not in exclude_id_set]
+args.test_norm_ids = [bearing_id for bearing_id in args.test_norm_ids if bearing_id not in exclude_id_set]
 args.cuda = torch.cuda.is_available()
 device = torch.device("cuda" if args.cuda else "cpu")
 
@@ -89,7 +102,10 @@ for seed in [2026]:
             stride_size=args.stride_size,
             train_ids=args.train_ids,
             val_ids=args.val_ids,
-            test_norm_ids=args.test_norm_ids
+            test_norm_ids=args.test_norm_ids,
+            exclude_ids=args.exclude_ids,
+            sampling_rate=args.sampling_rate,
+            n_bands=args.n_bands
         )
 
     # %%

@@ -37,6 +37,7 @@ parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='
 parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], help='Paderborn normal bearing IDs for training.')
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
+parser.add_argument('--exclude_ids', nargs='*', default=[], help='Paderborn bearing IDs to exclude from train, validation, and test splits.')
 parser.add_argument('--threshold_percentile', type=float, default=95, help='Percentile of validation normal scores for label-free thresholding.')
 
 parser.add_argument('--batch_size', type=int, default=512)
@@ -131,7 +132,8 @@ elif args.name.lower() == 'paderborn':
         stride_size=args.stride_size,
         train_ids=args.train_ids,
         val_ids=args.val_ids,
-        test_norm_ids=args.test_norm_ids
+        test_norm_ids=args.test_norm_ids,
+        exclude_ids=args.exclude_ids
     )
 else:
     raise ValueError(f'Unsupported dataset name: {args.name}')
@@ -236,6 +238,7 @@ if args.name.lower() == 'paderborn':
             'train_ids': list(args.train_ids),
             'val_ids': list(args.val_ids),
             'test_norm_ids': list(args.test_norm_ids),
+            'exclude_ids': list(args.exclude_ids),
         },
         'model_config': {
             'model': args.model,

@@ -38,6 +38,7 @@ parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='
 parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], help='Paderborn normal bearing IDs for training.')
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
+parser.add_argument('--exclude_ids', nargs='*', default=[], help='Paderborn bearing IDs to exclude from train, validation, and test splits.')
 
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
@@ -109,7 +110,8 @@ for seed in [2026]:
             stride_size=args.stride_size,
             train_ids=args.train_ids,
             val_ids=args.val_ids,
-            test_norm_ids=args.test_norm_ids
+            test_norm_ids=args.test_norm_ids,
+            exclude_ids=args.exclude_ids
         )
 
     # %%

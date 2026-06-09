@@ -36,12 +36,28 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
                          label=False,
                          train_ids=['K001', 'K002', 'K003'], 
                          val_ids=['K004'], 
-                         test_norm_ids=['K005', 'K006']):
+                         test_norm_ids=['K005', 'K006'],
+                         exclude_ids=None):
     """
     여러 세팅 폴더를 동시에 읽어와 통합 학습/추론이 가능한 OCC 데이터 로더
     예시: loads=['N15_M07_F10', 'N15_M01_F10'] 세팅 0과 세팅 2 동시 타겟팅
     """
     
+    def normalize_id_list(ids):
+        normalized = []
+        for item in ids or []:
+            normalized.extend(part.strip() for part in str(item).split(',') if part.strip())
+        return normalized
+
+    train_ids = set(normalize_id_list(train_ids))
+    val_ids = set(normalize_id_list(val_ids))
+    test_norm_ids = set(normalize_id_list(test_norm_ids))
+    exclude_ids = set(normalize_id_list(exclude_ids))
+
+    def extract_bearing_id(filename):
+        match = re.search(r'(K[A-Z]?\d{2,3})(?:_|\.)', filename)
+        return match.group(1) if match else filename.replace('.mat', '')
+
     # 여러 도메인의 파일들을 추적하기 위해 (폴더절대경로, 파일명) 튜플 형태로 수집 리스트 선언
     train_file_tuples = []
     val_file_tuples = []
@@ -58,14 +74,18 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
         filenames = [f for f in os.listdir(setting_path) if f.endswith('.mat')]
         
         for f in filenames:
+            bearing_id = extract_bearing_id(f)
+            if bearing_id in exclude_ids:
+                continue
+
             # 튜플 구조로 (실제폴더경로, 파일명) 저장하여 물리적 위치 분리 보존
             file_info = (setting_path, f)
             
-            if any(bid in f for bid in train_ids):
+            if bearing_id in train_ids:
                 train_file_tuples.append(file_info)
-            elif any(bid in f for bid in val_ids):
+            elif bearing_id in val_ids:
                 val_file_tuples.append(file_info)
-            elif any(bid in f for bid in test_norm_ids):
+            elif bearing_id in test_norm_ids:
                 test_normal_file_tuples.append(file_info)
             else:
                 # 지정된 정상 계열 외의 모든 실제 결함 파일들 수집
@@ -88,10 +108,6 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     
     scaler = StandardScaler()
     scaler.fit(np.concatenate(raw_train_signals).reshape(-1, 1))
-
-    def extract_bearing_id(filename):
-        match = re.search(r'(K[A-Z]?\d{2,3})(?:_|\.)', filename)
-        return match.group(1) if match else filename.replace('.mat', '')
 
     # 🚀 Step 3: 파일 경계면 브레이크 없이 윈도우를 추출하는 내부 헬퍼 함수
     def extract_scaled_windows(file_tuple_list):
@@ -120,6 +136,8 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
                 extracted_ids.append(bearing_id)
                 start += stride_size
                 
+        if not extracted_windows:
+            return np.empty((0, window_size)), np.array([], dtype=str)
         return np.array(extracted_windows), np.array(extracted_ids)
 
     # 🚀 Step 4: 멀티 도메인 데이터셋 윈도우 가공 및 빌딩
@@ -139,6 +157,8 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     n_sensor = 1 
 
     print(f'📈 [Multi-Domain OCC] Target Settings: {loads}')
+    if exclude_ids:
+        print(f'   - Excluded Bearing IDs: {sorted(exclude_ids)}')
     print(f'   - Total Train Windows: {len(train_x)} | Val Windows: {len(val_x)} | Test Windows: {len(test_x)}')
 
     # 파이토치 데이터로더 패킹 및 반환

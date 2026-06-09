@@ -58,10 +58,10 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     추출한 bandpass windows만으로 band별 mean/std를 fit하고 val/test/fault에는
     train에서 계산한 통계만 적용한다.
     """
-    exclude_ids = [] if exclude_ids is None else list(exclude_ids)
-    train_ids = _drop_excluded_ids(train_ids, exclude_ids)
-    val_ids = _drop_excluded_ids(val_ids, exclude_ids)
-    test_norm_ids = _drop_excluded_ids(test_norm_ids, exclude_ids)
+    exclude_ids = _normalize_id_list(exclude_ids)
+    train_ids = _drop_excluded_ids(_normalize_id_list(train_ids), exclude_ids)
+    val_ids = _drop_excluded_ids(_normalize_id_list(val_ids), exclude_ids)
+    test_norm_ids = _drop_excluded_ids(_normalize_id_list(test_norm_ids), exclude_ids)
 
     bands = _make_equal_band_ranges(
         sampling_rate=sampling_rate,
@@ -157,6 +157,21 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
 def extract_bearing_id(filename):
     match = re.search(r'(K[A-Z]?\d{2,3})(?:_|\.)', filename)
     return match.group(1) if match else filename.replace('.mat', '')
+
+
+def _normalize_id_list(ids):
+    if ids is None:
+        return []
+    if isinstance(ids, str):
+        ids = [ids]
+
+    normalized_ids = []
+    for id_value in ids:
+        for token in str(id_value).split(','):
+            normalized_id = token.strip().strip('[](){}\"\'')
+            if normalized_id:
+                normalized_ids.append(normalized_id)
+    return normalized_ids
 
 
 def _drop_excluded_ids(ids, exclude_ids):

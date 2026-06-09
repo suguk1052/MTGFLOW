@@ -32,7 +32,7 @@ parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='
 parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], help='Paderborn normal bearing IDs for training.')
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
-parser.add_argument('--exclude_ids', nargs='*', default=[], help='Paderborn bearing IDs to exclude from all splits, e.g. K006.')
+parser.add_argument('--exclude_ids', nargs='+', default=[], help='Paderborn bearing IDs to exclude from all splits, e.g. K006.')
 parser.add_argument('--sampling_rate', type=int, default=64000, help='Paderborn vibration_1 sampling rate in Hz.')
 parser.add_argument('--n_bands', type=int, default=8, help='Number of Paderborn bandpass vibration channels.')
 
@@ -43,7 +43,9 @@ parser.add_argument('--lr', type=float, default=2e-3, help='Learning rate.')
 
 
 
-args = parser.parse_known_args()[0]
+args, unknown_args = parser.parse_known_args()
+if unknown_args:
+    raise ValueError(f"Unknown command line arguments: {unknown_args}")
 if args.window_size is None:
     args.window_size = 2048 if args.name == 'paderborn' else 60
 if args.stride_size is None:

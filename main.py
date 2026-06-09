@@ -36,6 +36,7 @@ parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
 parser.add_argument('--window_size', type=int, default=60)
+parser.add_argument('--raw_window_size', type=int, default=2048, help='Paderborn raw waveform window size before FFT.')
 parser.add_argument('--lr', type=float, default=2e-3, help='Learning rate.')
 
 
@@ -87,10 +88,12 @@ for seed in [2026]:
             batch_size=args.batch_size,
             window_size=args.window_size,
             stride_size=args.stride_size,
+            raw_window_size=args.raw_window_size,
             train_ids=args.train_ids,
             val_ids=args.val_ids,
             test_norm_ids=args.test_norm_ids
         )
+        args.window_size = train_loader.dataset.window_size
 
     # %%
     model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm)

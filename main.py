@@ -1,6 +1,8 @@
 # %%
 import os
 import argparse
+import re
+from datetime import datetime
 import torch
 from models.MTGFLOW import MTGFLOW
 import numpy as np
@@ -12,6 +14,10 @@ parser.add_argument('--data_dir', type=str,
                     default='Data/input/SWaT_Dataset_Attack_v0.csv', help='Location of datasets.')
 parser.add_argument('--output_dir', type=str, 
                     default='./checkpoint/')
+parser.add_argument('--checkpoint_root', type=str, default='./checkpoints',
+                    help='Root directory for non-overwriting Paderborn checkpoints.')
+parser.add_argument('--run_name', type=str, default=None,
+                    help='Paderborn run name. If omitted, generated from timestamp and key settings.')
 parser.add_argument('--name', default='SWaT', help='the name of dataset')
 
 parser.add_argument('--graph', type=str, default='None')
@@ -45,9 +51,42 @@ args.cuda = torch.cuda.is_available()
 device = torch.device("cuda" if args.cuda else "cpu")
 
 
+def _slugify_run_part(value):
+    value = str(value)
+    value = re.sub(r'[^A-Za-z0-9_.-]+', '-', value)
+    return value.strip('-') or 'none'
+
+
+def build_paderborn_run_name(args):
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    loads = '+'.join(args.load_setting)
+    parts = [
+        timestamp,
+        f"loads-{loads}",
+        f"model-{args.model}",
+        f"blocks-{args.n_blocks}",
+        f"hidden-{args.hidden_size}",
+        f"win-{args.window_size}",
+        f"stride-{args.stride_size}",
+        f"bs-{args.batch_size}",
+        f"lr-{args.lr}",
+    ]
+    return '_'.join(_slugify_run_part(part) for part in parts)
+
+
+def resolve_save_path(args):
+    if args.name.lower() == 'paderborn':
+        if not args.run_name:
+            args.run_name = build_paderborn_run_name(args)
+        return os.path.join(args.checkpoint_root, 'Paderborn', args.run_name)
+    return os.path.join(args.output_dir, args.name)
+
+
 for seed in [2026]:
     args.seed = seed
     print(args)
+    if args.name.lower() == 'paderborn':
+        print(f"Paderborn run_name: {args.run_name or '<auto>'}")
     import random
     import numpy as np
     random.seed(args.seed)
@@ -80,7 +119,7 @@ for seed in [2026]:
                                                                     args.batch_size, args.window_size, args.stride_size, args.train_split)
 
     # 🚀 [수정 포인트 3] 쉘 스크립트에서 --name=paderborn 을 줬을 때 작동할 분기 연결
-    elif args.name == 'paderborn':
+    elif args.name.lower() == 'paderborn':
         train_loader, val_loader, test_loader, n_sensor = loader_Paderborn_OCC(
             root="/home/dayoon/DCP/Data/Paderborn",
             loads=args.load_setting,               # 스크립트에서 넘겨받은 하중 조건 세팅 주입
@@ -100,9 +139,10 @@ for seed in [2026]:
     from torch.nn.utils import clip_grad_value_
     import seaborn as sns
     import matplotlib.pyplot as plt
-    save_path = os.path.join(args.output_dir, args.name)
-    if not os.path.exists(save_path):
-        os.makedirs(save_path)
+    save_path = resolve_save_path(args)
+    os.makedirs(save_path, exist_ok=True)
+    if args.name.lower() == 'paderborn':
+        print(f"Saving Paderborn checkpoint to {os.path.join(save_path, 'model.pth')}")
 
 
     loss_best = np.inf
@@ -132,7 +172,7 @@ for seed in [2026]:
 
 
 
-        if args.name == 'paderborn':
+        if args.name.lower() == 'paderborn':
             loss_val = []
             model.eval()
             with torch.no_grad():
@@ -146,8 +186,10 @@ for seed in [2026]:
             if loss_best > mean_val_loss:
                 loss_best = mean_val_loss
                 torch.save({
-                'model': model.state_dict(),
-                }, f"{save_path}/model.pth")
+                    'model': model.state_dict(),
+                    'run_name': args.run_name,
+                    'args': vars(args),
+                }, os.path.join(save_path, 'model.pth'))
 
             log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Val Loss: {mean_val_loss:.4f} | Best Val Loss: {loss_best:.4f}"
             print(log_string)
@@ -169,8 +211,8 @@ for seed in [2026]:
             if roc_max < roc_test:
                 roc_max = roc_test
                 torch.save({
-                'model': model.state_dict(),
-                }, f"{save_path}/model.pth")
+                    'model': model.state_dict(),
+                }, os.path.join(save_path, 'model.pth'))
 
             roc_max = max(roc_test, roc_max)
 

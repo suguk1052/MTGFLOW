@@ -13,6 +13,14 @@ parser.add_argument('--data_dir', type=str,
                     default='../u_s/input/SWaT_Dataset_Attack_v0.csv', help='Location of datasets.')
 parser.add_argument('--output_dir', type=str, 
                     default='./checkpoint/')
+parser.add_argument('--checkpoint_root', type=str, default='./checkpoints',
+                    help='Root directory for non-overwriting Paderborn checkpoints.')
+parser.add_argument('--results_root', type=str, default='./results',
+                    help='Root directory for Paderborn test metrics JSON files.')
+parser.add_argument('--run_name', type=str, default=None,
+                    help='Paderborn run name to evaluate from checkpoints/Paderborn/{run_name}/model.pth.')
+parser.add_argument('--ckpt_path', type=str, default=None,
+                    help='Explicit checkpoint path. For Paderborn, overrides --run_name.')
 parser.add_argument('--name',default='SWaT', help='the name of dataset')
 
 parser.add_argument('--model', type=str, default='MAF')
@@ -44,7 +52,31 @@ parser.add_argument('--lr', type=float, default=2e-3, help='Learning rate.')
 args = parser.parse_known_args()[0]
 args.cuda = torch.cuda.is_available()
 device = torch.device("cuda" if args.cuda else "cpu")
-save_path = os.path.join(args.output_dir,args.name)
+
+
+def resolve_checkpoint_path(args):
+    if args.name.lower() == 'paderborn':
+        if args.ckpt_path:
+            return args.ckpt_path
+        if args.run_name:
+            return os.path.join(args.checkpoint_root, 'Paderborn', args.run_name, 'model.pth')
+        raise ValueError('Paderborn evaluation requires either --run_name or --ckpt_path.')
+    return os.path.join(args.output_dir, args.name, 'model.pth')
+
+
+def resolve_result_path(args, checkpoint_path):
+    if args.name.lower() == 'paderborn':
+        run_name = args.run_name
+        if not run_name:
+            ckpt_dir = os.path.dirname(os.path.abspath(checkpoint_path))
+            if os.path.basename(checkpoint_path) == 'model.pth':
+                run_name = os.path.basename(ckpt_dir)
+            else:
+                run_name = os.path.splitext(os.path.basename(checkpoint_path))[0]
+        return os.path.join(args.results_root, 'Paderborn', run_name, 'test_metrics.json')
+    return None
+
+checkpoint_path = resolve_checkpoint_path(args)
 
 from Dataset import load_smd_smap_msl, loader_SWat, loader_WADI, loader_PSM, loader_WADI_OCC
 
@@ -68,7 +100,7 @@ elif args.name == 'PSM':
                                                                 args.batch_size, args.window_size, args.stride_size, args.train_split)
 
 # 🚀 [수정 포인트 3] 쉘 스크립트에서 --name=paderborn 을 줬을 때 작동할 분기 연결
-elif args.name == 'paderborn':
+elif args.name.lower() == 'paderborn':
     train_loader, val_loader, test_loader, n_sensor = loader_Paderborn_OCC(
         root="/home/dayoon/DCP/Data/Paderborn", 
         loads=args.load_setting,
@@ -84,7 +116,8 @@ elif args.name == 'paderborn':
 model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model = args.model, batch_norm=args.batch_norm)
 model = model.to(device)
 
-checkpoint = torch.load(f"{save_path}/model.pth")
+print(f'Loading checkpoint from {checkpoint_path}')
+checkpoint = torch.load(checkpoint_path)
 model.load_state_dict(checkpoint['model'])
 
 
@@ -104,7 +137,7 @@ test_labels = np.asarray(test_loader.dataset.label,dtype=int)
 roc_test = roc_auc_score(test_labels,loss_test)
 print("The ROC score on {} dataset is {}".format(args.name, roc_test))
 
-if args.name == 'paderborn':
+if args.name.lower() == 'paderborn':
     val_scores = compute_scores(val_loader)
     threshold = float(np.percentile(val_scores, args.threshold_percentile))
     predictions = (loss_test >= threshold).astype(int)
@@ -125,6 +158,8 @@ if args.name == 'paderborn':
         })
 
     metrics = {
+        'run_name': os.path.basename(os.path.dirname(os.path.abspath(checkpoint_path))) if not args.run_name else args.run_name,
+        'checkpoint_path': checkpoint_path,
         'paderborn_config': {
             'root': '/home/dayoon/DCP/Data/Paderborn',
             'loads': list(args.load_setting),
@@ -151,7 +186,8 @@ if args.name == 'paderborn':
         'per_bearing': per_bearing_metrics,
     }
 
-    json_path = os.path.join(save_path, 'paderborn_per_bearing_metrics.json')
+    json_path = resolve_result_path(args, checkpoint_path)
+    os.makedirs(os.path.dirname(json_path), exist_ok=True)
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
-    print(f"Saved Paderborn per-bearing metrics to {json_path}")
+    print(f"Saved Paderborn test metrics to {json_path}")

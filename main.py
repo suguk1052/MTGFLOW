@@ -1,7 +1,6 @@
 # %%
 import os
 import argparse
-import re
 from datetime import datetime
 import torch
 from models.MTGFLOW import MTGFLOW
@@ -14,10 +13,8 @@ parser.add_argument('--data_dir', type=str,
                     default='Data/input/SWaT_Dataset_Attack_v0.csv', help='Location of datasets.')
 parser.add_argument('--output_dir', type=str, 
                     default='./checkpoint/')
-parser.add_argument('--checkpoint_root', type=str, default='./checkpoints',
-                    help='Root directory for non-overwriting Paderborn checkpoints.')
 parser.add_argument('--run_name', type=str, default=None,
-                    help='Paderborn run name. If omitted, generated from timestamp and key settings.')
+                    help='Paderborn run name. If omitted, generated from timestamp.')
 parser.add_argument('--name', default='SWaT', help='the name of dataset')
 
 parser.add_argument('--graph', type=str, default='None')
@@ -51,34 +48,15 @@ args.cuda = torch.cuda.is_available()
 device = torch.device("cuda" if args.cuda else "cpu")
 
 
-def _slugify_run_part(value):
-    value = str(value)
-    value = re.sub(r'[^A-Za-z0-9_.-]+', '-', value)
-    return value.strip('-') or 'none'
-
-
-def build_paderborn_run_name(args):
-    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-    loads = '+'.join(args.load_setting)
-    parts = [
-        timestamp,
-        f"loads-{loads}",
-        f"model-{args.model}",
-        f"blocks-{args.n_blocks}",
-        f"hidden-{args.hidden_size}",
-        f"win-{args.window_size}",
-        f"stride-{args.stride_size}",
-        f"bs-{args.batch_size}",
-        f"lr-{args.lr}",
-    ]
-    return '_'.join(_slugify_run_part(part) for part in parts)
+def build_paderborn_run_name():
+    return datetime.now().strftime('%Y%m%d_%H%M%S')
 
 
 def resolve_save_path(args):
     if args.name.lower() == 'paderborn':
         if not args.run_name:
-            args.run_name = build_paderborn_run_name(args)
-        return os.path.join(args.checkpoint_root, 'Paderborn', args.run_name)
+            args.run_name = build_paderborn_run_name()
+        return os.path.join('checkpoints', 'Paderborn', args.run_name)
     return os.path.join(args.output_dir, args.name)
 
 

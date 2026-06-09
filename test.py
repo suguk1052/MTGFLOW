@@ -13,14 +13,8 @@ parser.add_argument('--data_dir', type=str,
                     default='../u_s/input/SWaT_Dataset_Attack_v0.csv', help='Location of datasets.')
 parser.add_argument('--output_dir', type=str, 
                     default='./checkpoint/')
-parser.add_argument('--checkpoint_root', type=str, default='./checkpoints',
-                    help='Root directory for non-overwriting Paderborn checkpoints.')
-parser.add_argument('--results_root', type=str, default='./results',
-                    help='Root directory for Paderborn test metrics JSON files.')
 parser.add_argument('--run_name', type=str, default=None,
                     help='Paderborn run name to evaluate from checkpoints/Paderborn/{run_name}/model.pth.')
-parser.add_argument('--ckpt_path', type=str, default=None,
-                    help='Explicit checkpoint path. For Paderborn, overrides --run_name.')
 parser.add_argument('--name',default='SWaT', help='the name of dataset')
 
 parser.add_argument('--model', type=str, default='MAF')
@@ -56,24 +50,15 @@ device = torch.device("cuda" if args.cuda else "cpu")
 
 def resolve_checkpoint_path(args):
     if args.name.lower() == 'paderborn':
-        if args.ckpt_path:
-            return args.ckpt_path
-        if args.run_name:
-            return os.path.join(args.checkpoint_root, 'Paderborn', args.run_name, 'model.pth')
-        raise ValueError('Paderborn evaluation requires either --run_name or --ckpt_path.')
+        if not args.run_name:
+            raise ValueError('Paderborn evaluation requires --run_name.')
+        return os.path.join('checkpoints', 'Paderborn', args.run_name, 'model.pth')
     return os.path.join(args.output_dir, args.name, 'model.pth')
 
 
-def resolve_result_path(args, checkpoint_path):
+def resolve_result_path(args):
     if args.name.lower() == 'paderborn':
-        run_name = args.run_name
-        if not run_name:
-            ckpt_dir = os.path.dirname(os.path.abspath(checkpoint_path))
-            if os.path.basename(checkpoint_path) == 'model.pth':
-                run_name = os.path.basename(ckpt_dir)
-            else:
-                run_name = os.path.splitext(os.path.basename(checkpoint_path))[0]
-        return os.path.join(args.results_root, 'Paderborn', run_name, 'test_metrics.json')
+        return os.path.join('results', 'Paderborn', args.run_name, 'paderborn_per_bearing_metrics.json')
     return None
 
 checkpoint_path = resolve_checkpoint_path(args)
@@ -158,7 +143,7 @@ if args.name.lower() == 'paderborn':
         })
 
     metrics = {
-        'run_name': os.path.basename(os.path.dirname(os.path.abspath(checkpoint_path))) if not args.run_name else args.run_name,
+        'run_name': args.run_name,
         'checkpoint_path': checkpoint_path,
         'paderborn_config': {
             'root': '/home/dayoon/DCP/Data/Paderborn',
@@ -186,7 +171,7 @@ if args.name.lower() == 'paderborn':
         'per_bearing': per_bearing_metrics,
     }
 
-    json_path = resolve_result_path(args, checkpoint_path)
+    json_path = resolve_result_path(args)
     os.makedirs(os.path.dirname(json_path), exist_ok=True)
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)

@@ -2,6 +2,7 @@
 import os
 import argparse
 import json
+import time
 import torch
 from models.MTGFLOW import MTGFLOW
 import numpy as np
@@ -28,6 +29,8 @@ parser.add_argument('--input_size', type=int, default=1)
 parser.add_argument('--batch_norm', type=bool, default=False)
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
+parser.add_argument('--sampling_rate', type=float, default=1.0,
+                    help='Sampling rate in samples/sec. Used to estimate realtime inference requirements.')
 
 # 🚀 [수정 포인트 1] 파더보른 하중 조건 폴더 지정을 위한 인자 추가
 parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='Paderborn operational setting directories')
@@ -59,7 +62,41 @@ def resolve_checkpoint_path(args):
 def resolve_result_path(args):
     if args.name.lower() == 'paderborn':
         return os.path.join('results', 'Paderborn', args.run_name, 'paderborn_per_bearing_metrics.json')
-    return None
+    return os.path.join(args.output_dir, args.name, 'test_metrics.json')
+
+
+def synchronize_if_cuda():
+    if torch.cuda.is_available() and device.type == 'cuda':
+        torch.cuda.synchronize(device)
+
+
+def compute_realtime_stats(num_windows, model_only_sec, end_to_end_sec, args):
+    model_only_wps = float(num_windows / model_only_sec) if model_only_sec > 0 else None
+    end_to_end_wps = float(num_windows / end_to_end_sec) if end_to_end_sec > 0 else None
+    required_wps_for_realtime = float(args.sampling_rate / args.stride_size) if args.stride_size > 0 else None
+    realtime_factor = (
+        float(model_only_wps / required_wps_for_realtime)
+        if model_only_wps is not None and required_wps_for_realtime is not None and required_wps_for_realtime > 0
+        else None
+    )
+    end_to_end_realtime_factor = (
+        float(end_to_end_wps / required_wps_for_realtime)
+        if end_to_end_wps is not None and required_wps_for_realtime is not None and required_wps_for_realtime > 0
+        else None
+    )
+    return {
+        'sampling_rate': float(args.sampling_rate),
+        'stride_size': int(args.stride_size),
+        'required_wps_for_realtime': required_wps_for_realtime,
+        'total_windows': int(num_windows),
+        'model_only_inference_time_sec': float(model_only_sec),
+        'model_only_wps': model_only_wps,
+        'realtime_factor': realtime_factor,
+        'end_to_end_inference_time_sec': float(end_to_end_sec),
+        'end_to_end_wps': end_to_end_wps,
+        'end_to_end_realtime_factor': end_to_end_realtime_factor,
+        'device': str(device),
+    }
 
 checkpoint_path = resolve_checkpoint_path(args)
 
@@ -96,6 +133,8 @@ elif args.name.lower() == 'paderborn':
         val_ids=args.val_ids,
         test_norm_ids=args.test_norm_ids
     )
+else:
+    raise ValueError(f'Unsupported dataset name: {args.name}')
 
 #%%
 model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model = args.model, batch_norm=args.batch_norm)
@@ -108,19 +147,62 @@ model.load_state_dict(checkpoint['model'])
 
 model.eval()
 
-def compute_scores(loader):
+def compute_scores(loader, measure_speed=False):
     scores = []
+    num_windows = 0
+    model_only_sec = 0.0
+
+    synchronize_if_cuda()
+    end_to_end_start = time.perf_counter()
     with torch.no_grad():
         for x, _, _ in loader:
             x = x.to(device)
-            loss = -model.test(x,).cpu().numpy()
-            scores.append(loss)
-    return np.concatenate(scores)
+            batch_size = x.shape[0]
 
-loss_test = compute_scores(test_loader)
+            synchronize_if_cuda()
+            model_start = time.perf_counter()
+            loss_tensor = -model.test(x,)
+            synchronize_if_cuda()
+            model_only_sec += time.perf_counter() - model_start
+
+            loss = loss_tensor.cpu().numpy()
+            scores.append(loss)
+            num_windows += batch_size
+    synchronize_if_cuda()
+    end_to_end_sec = time.perf_counter() - end_to_end_start
+
+    scores = np.concatenate(scores)
+    if measure_speed:
+        return scores, compute_realtime_stats(num_windows, model_only_sec, end_to_end_sec, args)
+    return scores
+
+loss_test, inference_speed = compute_scores(test_loader, measure_speed=True)
 test_labels = np.asarray(test_loader.dataset.label,dtype=int)
 roc_test = roc_auc_score(test_labels,loss_test)
 print("The ROC score on {} dataset is {}".format(args.name, roc_test))
+print(
+    "Test inference speed on {} dataset: "
+    "model-only={:.2f} windows/sec ({:.6f}s), "
+    "end-to-end={:.2f} windows/sec ({:.6f}s), "
+    "required_realtime={:.2f} windows/sec, "
+    "realtime_factor={:.2f}x".format(
+        args.name,
+        inference_speed['model_only_wps'] or 0.0,
+        inference_speed['model_only_inference_time_sec'],
+        inference_speed['end_to_end_wps'] or 0.0,
+        inference_speed['end_to_end_inference_time_sec'],
+        inference_speed['required_wps_for_realtime'] or 0.0,
+        inference_speed['realtime_factor'] or 0.0,
+    )
+)
+
+metrics = {
+    'checkpoint_path': checkpoint_path,
+    'dataset': args.name,
+    'overall_auroc': float(roc_test),
+    'total_windows': int(len(loss_test)),
+    'inference_speed': inference_speed,
+}
 
 if args.name.lower() == 'paderborn':
     val_scores = compute_scores(val_loader)
@@ -142,15 +224,15 @@ if args.name.lower() == 'paderborn':
             'accuracy': float(np.mean(preds == labels)),
         })
 
-    metrics = {
+    metrics.update({
         'run_name': args.run_name,
-        'checkpoint_path': checkpoint_path,
         'paderborn_config': {
             'root': '/home/dayoon/DCP/Data/Paderborn',
             'loads': list(args.load_setting),
             'batch_size': int(args.batch_size),
             'window_size': int(args.window_size),
             'stride_size': int(args.stride_size),
+            'sampling_rate': float(args.sampling_rate),
             'train_ids': list(args.train_ids),
             'val_ids': list(args.val_ids),
             'test_norm_ids': list(args.test_norm_ids),
@@ -163,16 +245,33 @@ if args.name.lower() == 'paderborn':
             'input_size': int(args.input_size),
             'batch_norm': bool(args.batch_norm),
         },
-        'overall_auroc': float(roc_test),
         'threshold': threshold,
         'threshold_percentile': float(args.threshold_percentile),
         'overall_accuracy': overall_accuracy,
-        'total_windows': int(len(loss_test)),
         'per_bearing': per_bearing_metrics,
-    }
+    })
+else:
+    metrics.update({
+        'model_config': {
+            'model': args.model,
+            'n_blocks': int(args.n_blocks),
+            'hidden_size': int(args.hidden_size),
+            'n_hidden': int(args.n_hidden),
+            'input_size': int(args.input_size),
+            'batch_norm': bool(args.batch_norm),
+        },
+        'data_config': {
+            'data_dir': args.data_dir,
+            'batch_size': int(args.batch_size),
+            'window_size': int(args.window_size),
+            'stride_size': int(args.stride_size),
+            'sampling_rate': float(args.sampling_rate),
+            'train_split': float(args.train_split),
+        },
+    })
 
-    json_path = resolve_result_path(args)
-    os.makedirs(os.path.dirname(json_path), exist_ok=True)
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(metrics, f, indent=2, ensure_ascii=False)
-    print(f"Saved Paderborn test metrics to {json_path}")
+json_path = resolve_result_path(args)
+os.makedirs(os.path.dirname(json_path), exist_ok=True)
+with open(json_path, 'w', encoding='utf-8') as f:
+    json.dump(metrics, f, indent=2, ensure_ascii=False)
+print(f"Saved test metrics to {json_path}")

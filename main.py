@@ -1,6 +1,7 @@
 # %%
 import os
 import argparse
+import time
 from datetime import datetime
 import torch
 from models.MTGFLOW import MTGFLOW
@@ -29,6 +30,8 @@ parser.add_argument('--input_size', type=int, default=1)
 parser.add_argument('--batch_norm', type=bool, default=False)
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
+parser.add_argument('--sampling_rate', type=float, default=1.0,
+                    help='Sampling rate in samples/sec. Used to estimate realtime inference requirements.')
 
 # 🚀 [수정 포인트 1] 파더보른 하중 조건 폴더 지정을 위한 인자 추가
 parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='Paderborn operational setting directories')
@@ -131,7 +134,10 @@ for seed in [2026]:
         {'params': model.parameters(), 'weight_decay': args.weight_decay},
         ], lr=lr, weight_decay=0.0)
 
+    train_start_time = time.perf_counter()
+
     for epoch in range(40):
+        epoch_start_time = time.perf_counter()
         loss_train = []
 
         model.train()
@@ -169,7 +175,8 @@ for seed in [2026]:
                     'args': vars(args),
                 }, os.path.join(save_path, 'model.pth'))
 
-            log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Val Loss: {mean_val_loss:.4f} | Best Val Loss: {loss_best:.4f}"
+            epoch_wall_clock_sec = time.perf_counter() - epoch_start_time
+            log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Val Loss: {mean_val_loss:.4f} | Best Val Loss: {loss_best:.4f} | Epoch Wall-Clock: {epoch_wall_clock_sec:.2f}s"
             print(log_string)
         else:
             loss_test = []
@@ -195,5 +202,9 @@ for seed in [2026]:
             roc_max = max(roc_test, roc_max)
 
             # 터미널 출력 포맷 수정
-            log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Test AUROC: {roc_test:.4f} | Best AUROC: {roc_max:.4f}"
+            epoch_wall_clock_sec = time.perf_counter() - epoch_start_time
+            log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Test AUROC: {roc_test:.4f} | Best AUROC: {roc_max:.4f} | Epoch Wall-Clock: {epoch_wall_clock_sec:.2f}s"
             print(log_string)
+
+    train_wall_clock_sec = time.perf_counter() - train_start_time
+    print(f"[Seed {seed}] Train wall-clock time: {train_wall_clock_sec:.2f}s ({train_wall_clock_sec / 60:.2f} min)")

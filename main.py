@@ -56,7 +56,7 @@ def resolve_save_path(args):
     if args.name.lower() == 'paderborn':
         if not args.run_name:
             args.run_name = build_paderborn_run_name()
-        return os.path.join('checkpoints', 'Paderborn', args.run_name)
+        return os.path.join('results', 'Paderborn', args.run_name)
     return os.path.join(args.output_dir, args.name)
 
 
@@ -120,7 +120,7 @@ for seed in [2026]:
     save_path = resolve_save_path(args)
     os.makedirs(save_path, exist_ok=True)
     if args.name.lower() == 'paderborn':
-        print(f"Saving Paderborn checkpoint to {os.path.join(save_path, 'model.pth')}")
+        print(f"Saving Paderborn model to {os.path.join(save_path, 'model.pth')}")
 
 
     loss_best = np.inf

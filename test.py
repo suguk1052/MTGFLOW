@@ -14,7 +14,7 @@ parser.add_argument('--data_dir', type=str,
 parser.add_argument('--output_dir', type=str, 
                     default='./checkpoint/')
 parser.add_argument('--run_name', type=str, default=None,
-                    help='Paderborn run name to evaluate from checkpoints/Paderborn/{run_name}/model.pth.')
+                    help='Paderborn run name to evaluate from results/Paderborn/{run_name}/model.pth.')
 parser.add_argument('--name',default='SWaT', help='the name of dataset')
 
 parser.add_argument('--model', type=str, default='MAF')
@@ -52,7 +52,7 @@ def resolve_checkpoint_path(args):
     if args.name.lower() == 'paderborn':
         if not args.run_name:
             raise ValueError('Paderborn evaluation requires --run_name.')
-        return os.path.join('checkpoints', 'Paderborn', args.run_name, 'model.pth')
+        return os.path.join('results', 'Paderborn', args.run_name, 'model.pth')
     return os.path.join(args.output_dir, args.name, 'model.pth')
 
 

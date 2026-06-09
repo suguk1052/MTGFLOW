@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Change RUN_NAME to the checkpoint folder name you want to evaluate.
+# Change RUN_NAME to the result folder name you want to evaluate.
 RUN_NAME="S0_A_raw_ch1_win2048"
 
 CUDA_VISIBLE_DEVICES=0 python3 test.py \

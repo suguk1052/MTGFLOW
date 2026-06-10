@@ -6,26 +6,70 @@
 import os
 import numpy as np
 import scipy.io
+from scipy import signal
 import re
 import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
 class Paderborn_dataset(Dataset):
-    def __init__(self, windows, labels, window_size, ids=None) -> None:
+    def __init__(self, windows, labels, window_size, ids=None, input_size=1) -> None:
         super(Paderborn_dataset, self).__init__()
-        self.windows = windows  
-        self.label = labels     
+        self.windows = windows
+        self.label = labels
         self.window_size = window_size
+        self.input_size = input_size
         self.ids = np.array(ids) if ids is not None else np.array(['unknown'] * len(windows))
 
     def __len__(self):
         return len(self.windows)
 
     def __getitem__(self, index):
-        # [Batch, Length, 1] -> MTGFlow 규격 맞춤 [1, Length, 1]
-        window_data = self.windows[index].reshape([self.window_size, -1, 1])
+        # raw: [window_size] -> [1, window_size, 1]
+        # stft: [stft_time_frames, n_bands] -> [n_bands, stft_time_frames, 1]
+        window_data = self.windows[index].reshape([self.window_size, self.input_size, 1])
         return torch.FloatTensor(window_data).transpose(0, 1), self.label[index], index
+
+
+def _stft_band_pool_window(window, n_fft=256, hop_length=64, n_bands=16, logmag=True):
+    if n_fft <= 0:
+        raise ValueError('stft_n_fft must be positive.')
+    if hop_length <= 0:
+        raise ValueError('stft_hop_length must be positive.')
+    if hop_length > n_fft:
+        raise ValueError('stft_hop_length must be less than or equal to stft_n_fft.')
+    if n_bands <= 0:
+        raise ValueError('stft_n_bands must be positive.')
+    if n_fft > len(window):
+        raise ValueError('stft_n_fft must be less than or equal to window_size for Paderborn STFT features.')
+
+    _, _, zxx = signal.stft(
+        np.asarray(window).reshape(-1),
+        nperseg=n_fft,
+        noverlap=n_fft - hop_length,
+        nfft=n_fft,
+        boundary='zeros',
+        padded=True,
+    )
+    magnitude = np.abs(zxx).astype(np.float32)
+    if logmag:
+        magnitude = np.log1p(magnitude)
+
+    freq_bins = magnitude.shape[0]
+    if n_bands > freq_bins:
+        raise ValueError(f'stft_n_bands ({n_bands}) cannot exceed STFT frequency bins ({freq_bins}).')
+
+    pooled_bands = [magnitude[band].mean(axis=0) for band in np.array_split(np.arange(freq_bins), n_bands)]
+    return np.stack(pooled_bands, axis=1).astype(np.float32)
+
+
+def _apply_stft_band_pooling(windows, n_fft=256, hop_length=64, n_bands=16, logmag=True):
+    if len(windows) == 0:
+        return np.empty((0, 0, n_bands), dtype=np.float32)
+    return np.stack([
+        _stft_band_pool_window(window, n_fft=n_fft, hop_length=hop_length, n_bands=n_bands, logmag=logmag)
+        for window in windows
+    ], axis=0)
 
 
 def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn", 
@@ -37,7 +81,12 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
                          train_ids=['K001', 'K002', 'K003'], 
                          val_ids=['K004'], 
                          test_norm_ids=['K005', 'K006'],
-                         exclude_ids=None):
+                         exclude_ids=None,
+                         feature_type='raw',
+                         stft_n_fft=256,
+                         stft_hop_length=64,
+                         stft_n_bands=16,
+                         stft_logmag=True):
     """
     여러 세팅 폴더를 동시에 읽어와 통합 학습/추론이 가능한 OCC 데이터 로더
     예시: loads=['N15_M07_F10', 'N15_M01_F10'] 세팅 0과 세팅 2 동시 타겟팅
@@ -48,6 +97,10 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
         for item in ids or []:
             normalized.extend(part.strip() for part in str(item).split(',') if part.strip())
         return normalized
+
+    feature_type = feature_type.lower()
+    if feature_type not in {'raw', 'stft'}:
+        raise ValueError("feature_type must be either 'raw' or 'stft'.")
 
     train_ids = set(normalize_id_list(train_ids))
     val_ids = set(normalize_id_list(val_ids))
@@ -154,17 +207,28 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     val_y = np.zeros(len(val_x))
     test_y = np.array([0] * len(test_norm_x) + [1] * len(test_fault_x))
 
-    n_sensor = 1 
+    if feature_type == 'stft':
+        train_x = _apply_stft_band_pooling(train_x, stft_n_fft, stft_hop_length, stft_n_bands, stft_logmag)
+        val_x = _apply_stft_band_pooling(val_x, stft_n_fft, stft_hop_length, stft_n_bands, stft_logmag)
+        test_x = _apply_stft_band_pooling(test_x, stft_n_fft, stft_hop_length, stft_n_bands, stft_logmag)
+        feature_window_size = train_x.shape[1]
+        input_size = train_x.shape[2]
+        n_sensor = stft_n_bands
+    else:
+        feature_window_size = window_size
+        input_size = 1
+        n_sensor = 1
 
     print(f'📈 [Multi-Domain OCC] Target Settings: {loads}')
     if exclude_ids:
         print(f'   - Excluded Bearing IDs: {sorted(exclude_ids)}')
+    print(f'   - Feature Type: {feature_type} | Feature Shape Per Window: [{feature_window_size}, {input_size}]')
     print(f'   - Total Train Windows: {len(train_x)} | Val Windows: {len(val_x)} | Test Windows: {len(test_x)}')
 
     # 파이토치 데이터로더 패킹 및 반환
-    train_loader = DataLoader(Paderborn_dataset(train_x, train_y, window_size, train_ids_per_window), batch_size=batch_size, shuffle=not label)
-    val_loader = DataLoader(Paderborn_dataset(val_x, val_y, window_size, val_ids_per_window), batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(Paderborn_dataset(test_x, test_y, window_size, test_ids_per_window), batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(Paderborn_dataset(train_x, train_y, feature_window_size, train_ids_per_window, input_size), batch_size=batch_size, shuffle=not label)
+    val_loader = DataLoader(Paderborn_dataset(val_x, val_y, feature_window_size, val_ids_per_window, input_size), batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(Paderborn_dataset(test_x, test_y, feature_window_size, test_ids_per_window, input_size), batch_size=batch_size, shuffle=False)
 
     return train_loader, val_loader, test_loader, n_sensor
 

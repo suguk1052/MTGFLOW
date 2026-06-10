@@ -38,6 +38,11 @@ parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], 
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
 parser.add_argument('--exclude_ids', nargs='*', default=[], help='Paderborn bearing IDs to exclude from train, validation, and test splits.')
+parser.add_argument('--feature_type', choices=['raw', 'stft'], default='raw', help='Paderborn feature type used at train time.')
+parser.add_argument('--stft_n_fft', type=int, default=256, help='Paderborn STFT FFT size used at train time.')
+parser.add_argument('--stft_hop_length', type=int, default=64, help='Paderborn STFT hop length used at train time.')
+parser.add_argument('--stft_n_bands', type=int, default=16, help='Paderborn STFT pooled band count used at train time.')
+parser.add_argument('--stft_logmag', action='store_true', default=True, help='Use log1p magnitude for Paderborn STFT features (enabled by default).')
 parser.add_argument('--threshold_percentile', type=float, default=95, help='Percentile of validation normal scores for label-free thresholding.')
 
 parser.add_argument('--batch_size', type=int, default=512)
@@ -100,6 +105,32 @@ def compute_realtime_stats(num_windows, model_only_sec, end_to_end_sec, args):
     }
 
 checkpoint_path = resolve_checkpoint_path(args)
+print(f'Loading checkpoint metadata from {checkpoint_path}')
+checkpoint = torch.load(checkpoint_path, map_location=device)
+
+
+def validate_paderborn_feature_config(args, checkpoint):
+    feature_config = checkpoint.get('feature_config')
+    if args.name.lower() != 'paderborn' or feature_config is None:
+        return
+    cli_config = {
+        'feature_type': args.feature_type,
+        'stft_n_fft': int(args.stft_n_fft),
+        'stft_hop_length': int(args.stft_hop_length),
+        'stft_n_bands': int(args.stft_n_bands),
+        'stft_logmag': bool(args.stft_logmag),
+        'raw_window_size': int(args.window_size),
+    }
+    mismatches = []
+    for key, cli_value in cli_config.items():
+        saved_value = feature_config.get(key)
+        if saved_value != cli_value:
+            mismatches.append(f'{key}: checkpoint={saved_value}, cli={cli_value}')
+    if mismatches:
+        raise ValueError('Paderborn feature configuration mismatch. Train and test must use identical feature settings: ' + '; '.join(mismatches))
+
+
+validate_paderborn_feature_config(args, checkpoint)
 
 from Dataset import load_smd_smap_msl, loader_SWat, loader_WADI, loader_PSM, loader_WADI_OCC
 
@@ -133,17 +164,26 @@ elif args.name.lower() == 'paderborn':
         train_ids=args.train_ids,
         val_ids=args.val_ids,
         test_norm_ids=args.test_norm_ids,
-        exclude_ids=args.exclude_ids
+        exclude_ids=args.exclude_ids,
+        feature_type=args.feature_type,
+        stft_n_fft=args.stft_n_fft,
+        stft_hop_length=args.stft_hop_length,
+        stft_n_bands=args.stft_n_bands,
+        stft_logmag=args.stft_logmag
     )
 else:
     raise ValueError(f'Unsupported dataset name: {args.name}')
 
+if args.name.lower() == 'paderborn':
+    model_window_size = train_loader.dataset.window_size
+else:
+    model_window_size = args.window_size
+
 #%%
-model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model = args.model, batch_norm=args.batch_norm)
+model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, model_window_size, n_sensor, dropout=0.0, model = args.model, batch_norm=args.batch_norm)
 model = model.to(device)
 
-print(f'Loading checkpoint from {checkpoint_path}')
-checkpoint = torch.load(checkpoint_path)
+print(f'Loading checkpoint weights from {checkpoint_path}')
 model.load_state_dict(checkpoint['model'])
 
 
@@ -239,6 +279,12 @@ if args.name.lower() == 'paderborn':
             'val_ids': list(args.val_ids),
             'test_norm_ids': list(args.test_norm_ids),
             'exclude_ids': list(args.exclude_ids),
+            'feature_type': args.feature_type,
+            'stft_n_fft': int(args.stft_n_fft),
+            'stft_hop_length': int(args.stft_hop_length),
+            'stft_n_bands': int(args.stft_n_bands),
+            'stft_logmag': bool(args.stft_logmag),
+            'model_window_size': int(model_window_size),
         },
         'model_config': {
             'model': args.model,

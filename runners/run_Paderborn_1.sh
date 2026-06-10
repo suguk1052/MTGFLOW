@@ -7,6 +7,12 @@
 # Change RUN_NAME when you change this experiment setting.
 RUN_NAME="S0_A_raw_ch1_win2048"
 
+# STFT feature example (train/test must use identical values):
+#   --feature_type stft \
+#   --stft_n_fft 256 \
+#   --stft_hop_length 64 \
+#   --stft_n_bands 16
+
 CUDA_VISIBLE_DEVICES=0 python3 main.py \
     --name=paderborn \
     --run_name="$RUN_NAME" \

@@ -39,6 +39,11 @@ parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], 
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
 parser.add_argument('--exclude_ids', nargs='*', default=[], help='Paderborn bearing IDs to exclude from train, validation, and test splits.')
+parser.add_argument('--feature_type', choices=['raw', 'stft'], default='raw', help='Paderborn feature type. raw keeps the original 1-channel vibration window; stft converts each window to band-pooled STFT features.')
+parser.add_argument('--stft_n_fft', type=int, default=256, help='Paderborn STFT FFT size.')
+parser.add_argument('--stft_hop_length', type=int, default=64, help='Paderborn STFT hop length.')
+parser.add_argument('--stft_n_bands', type=int, default=16, help='Number of pooled contiguous frequency bands for Paderborn STFT features.')
+parser.add_argument('--stft_logmag', action='store_true', default=True, help='Use log1p magnitude for Paderborn STFT features (enabled by default).')
 
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
@@ -52,14 +57,17 @@ args.cuda = torch.cuda.is_available()
 device = torch.device("cuda" if args.cuda else "cpu")
 
 
-def build_paderborn_run_name():
-    return datetime.now().strftime('%Y%m%d_%H%M%S')
+def build_paderborn_run_name(args):
+    feature_suffix = 'raw'
+    if args.feature_type == 'stft':
+        feature_suffix = f'stft{args.stft_n_fft}_h{args.stft_hop_length}_b{args.stft_n_bands}'
+    return f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{feature_suffix}"
 
 
 def resolve_save_path(args):
     if args.name.lower() == 'paderborn':
         if not args.run_name:
-            args.run_name = build_paderborn_run_name()
+            args.run_name = build_paderborn_run_name(args)
         return os.path.join('results', 'Paderborn', args.run_name)
     return os.path.join(args.output_dir, args.name)
 
@@ -111,11 +119,21 @@ for seed in [2026]:
             train_ids=args.train_ids,
             val_ids=args.val_ids,
             test_norm_ids=args.test_norm_ids,
-            exclude_ids=args.exclude_ids
+            exclude_ids=args.exclude_ids,
+            feature_type=args.feature_type,
+            stft_n_fft=args.stft_n_fft,
+            stft_hop_length=args.stft_hop_length,
+            stft_n_bands=args.stft_n_bands,
+            stft_logmag=args.stft_logmag
         )
 
+    if args.name.lower() == 'paderborn':
+        model_window_size = train_loader.dataset.window_size
+    else:
+        model_window_size = args.window_size
+
     # %%
-    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm)
+    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, model_window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm)
     model = model.to(device)
 
     # %%
@@ -175,6 +193,17 @@ for seed in [2026]:
                     'model': model.state_dict(),
                     'run_name': args.run_name,
                     'args': vars(args),
+                    'feature_config': {
+                        'feature_type': args.feature_type,
+                        'stft_n_fft': int(args.stft_n_fft),
+                        'stft_hop_length': int(args.stft_hop_length),
+                        'stft_n_bands': int(args.stft_n_bands),
+                        'stft_logmag': bool(args.stft_logmag),
+                        'raw_window_size': int(args.window_size),
+                        'model_window_size': int(model_window_size),
+                        'input_size': int(args.input_size),
+                        'n_sensor': int(n_sensor),
+                    },
                 }, os.path.join(save_path, 'model.pth'))
 
             epoch_wall_clock_sec = time.perf_counter() - epoch_start_time

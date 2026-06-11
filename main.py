@@ -39,6 +39,13 @@ parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], 
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
 parser.add_argument('--exclude_ids', nargs='*', default=[], help='Paderborn bearing IDs to exclude from train, validation, and test splits.')
+parser.add_argument(
+    '--sensor_mode',
+    type=str,
+    default='vib',
+    choices=['vib', 'mcs', 'vib_mcs'],
+    help='Paderborn sensor selection: vib, mcs, or vib_mcs.'
+)
 
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
@@ -52,14 +59,14 @@ args.cuda = torch.cuda.is_available()
 device = torch.device("cuda" if args.cuda else "cpu")
 
 
-def build_paderborn_run_name():
-    return datetime.now().strftime('%Y%m%d_%H%M%S')
+def build_paderborn_run_name(args):
+    return f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{args.sensor_mode}"
 
 
 def resolve_save_path(args):
     if args.name.lower() == 'paderborn':
         if not args.run_name:
-            args.run_name = build_paderborn_run_name()
+            args.run_name = build_paderborn_run_name(args)
         return os.path.join('results', 'Paderborn', args.run_name)
     return os.path.join(args.output_dir, args.name)
 
@@ -82,7 +89,7 @@ for seed in [2026]:
     from Dataset import load_smd_smap_msl, loader_SWat, loader_WADI, loader_PSM, loader_WADI_OCC
     
     # 🚀 [수정 포인트 2] 우리가 작성한 파더보른 OCC 로더 함수 임포트
-    from Dataset.paderborn import loader_Paderborn_OCC
+    from Dataset.paderborn import get_sensor_names, loader_Paderborn_OCC
 
     if args.name == 'SWaT':
         train_loader, val_loader, test_loader, n_sensor = loader_SWat(args.data_dir, \
@@ -111,7 +118,8 @@ for seed in [2026]:
             train_ids=args.train_ids,
             val_ids=args.val_ids,
             test_norm_ids=args.test_norm_ids,
-            exclude_ids=args.exclude_ids
+            exclude_ids=args.exclude_ids,
+            sensor_mode=args.sensor_mode
         )
 
     # %%
@@ -175,6 +183,9 @@ for seed in [2026]:
                     'model': model.state_dict(),
                     'run_name': args.run_name,
                     'args': vars(args),
+                    'sensor_mode': args.sensor_mode,
+                    'sensor_names': get_sensor_names(args.sensor_mode),
+                    'n_sensor': n_sensor,
                 }, os.path.join(save_path, 'model.pth'))
 
             epoch_wall_clock_sec = time.perf_counter() - epoch_start_time

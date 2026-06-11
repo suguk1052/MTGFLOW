@@ -30,6 +30,8 @@ class Paderborn_dataset(Dataset):
 
 def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn", 
                          loads=["N15_M07_F10"],
+                         source_loads=None,
+                         target_loads=None,
                          batch_size=64, 
                          window_size=2048, 
                          stride_size=1024, 
@@ -37,10 +39,16 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
                          train_ids=['K001', 'K002', 'K003'], 
                          val_ids=['K004'], 
                          test_norm_ids=['K005', 'K006'],
-                         exclude_ids=None):
+                         exclude_ids=None,
+                         sensor_mode='vibration_1'):
     """
-    여러 세팅 폴더를 동시에 읽어와 통합 학습/추론이 가능한 OCC 데이터 로더
-    예시: loads=['N15_M07_F10', 'N15_M01_F10'] 세팅 0과 세팅 2 동시 타겟팅
+    여러 세팅 폴더를 동시에 읽어와 통합 학습/추론이 가능한 OCC 데이터 로더.
+
+    기본값은 기존 pooled multi-setting 동작과 동일하게 ``loads``의 모든 setting에서
+    train/val/test를 모두 수집한다. ``source_loads`` 또는 ``target_loads``가 주어지면
+    train/val은 source setting에서만, test normal/fault는 target setting에서만 수집하는
+    cross-domain split으로 동작한다. StandardScaler는 항상 source train normal 파일에만
+    fit되고, val/test에는 동일 scaler의 transform만 적용된다.
     """
     
     def normalize_id_list(ids):
@@ -53,6 +61,10 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     val_ids = set(normalize_id_list(val_ids))
     test_norm_ids = set(normalize_id_list(test_norm_ids))
     exclude_ids = set(normalize_id_list(exclude_ids))
+    loads = normalize_id_list(loads)
+    source_loads = normalize_id_list(source_loads) if source_loads is not None else list(loads)
+    target_loads = normalize_id_list(target_loads) if target_loads is not None else list(loads)
+    mode = 'pooled' if source_loads == target_loads and source_loads == loads else 'cross-domain'
 
     def extract_bearing_id(filename):
         match = re.search(r'(K[A-Z]?\d{2,3})(?:_|\.)', filename)
@@ -64,32 +76,35 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     test_normal_file_tuples = []
     test_fault_file_tuples = []
 
-    # 🚀 Step 1: 지정된 모든 하중(운전 조건) 폴더를 순회하며 파일 분류 수집
-    for load_setting in loads:
-        setting_path = os.path.join(root, load_setting)
-        if not os.path.exists(setting_path):
-            print(f"⚠️ 경고: 해당 운전 조건 폴더가 경로에 없어 건너뜁니다: {setting_path}")
-            continue
-            
-        filenames = [f for f in os.listdir(setting_path) if f.endswith('.mat')]
-        
-        for f in filenames:
-            bearing_id = extract_bearing_id(f)
-            if bearing_id in exclude_ids:
+    def iter_setting_files(setting_list):
+        for load_setting in setting_list:
+            setting_path = os.path.join(root, load_setting)
+            if not os.path.exists(setting_path):
+                print(f"⚠️ 경고: 해당 운전 조건 폴더가 경로에 없어 건너뜁니다: {setting_path}")
                 continue
 
-            # 튜플 구조로 (실제폴더경로, 파일명) 저장하여 물리적 위치 분리 보존
-            file_info = (setting_path, f)
-            
-            if bearing_id in train_ids:
-                train_file_tuples.append(file_info)
-            elif bearing_id in val_ids:
-                val_file_tuples.append(file_info)
-            elif bearing_id in test_norm_ids:
-                test_normal_file_tuples.append(file_info)
-            else:
-                # 지정된 정상 계열 외의 모든 실제 결함 파일들 수집
-                test_fault_file_tuples.append(file_info)
+            filenames = [f for f in os.listdir(setting_path) if f.endswith('.mat')]
+            for f in filenames:
+                bearing_id = extract_bearing_id(f)
+                if bearing_id in exclude_ids:
+                    continue
+                yield setting_path, f, bearing_id
+
+    # 🚀 Step 1: source settings에서는 train/val만, target settings에서는 test만 수집
+    for setting_path, f, bearing_id in iter_setting_files(source_loads):
+        file_info = (setting_path, f)
+        if bearing_id in train_ids:
+            train_file_tuples.append(file_info)
+        elif bearing_id in val_ids:
+            val_file_tuples.append(file_info)
+
+    for setting_path, f, bearing_id in iter_setting_files(target_loads):
+        file_info = (setting_path, f)
+        if bearing_id in test_norm_ids:
+            test_normal_file_tuples.append(file_info)
+        elif bearing_id not in train_ids and bearing_id not in val_ids:
+            # 지정된 정상 계열 외의 모든 실제 결함 파일들 수집
+            test_fault_file_tuples.append(file_info)
 
     if len(train_file_tuples) == 0:
         raise ValueError("❌ 지정된 조건에 맞는 학습 데이터 파일(.mat)을 찾을 수 없습니다.")
@@ -101,8 +116,8 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
         mat = scipy.io.loadmat(os.path.join(folder_path, f))
         key = f.replace('.mat', '')
         for j in mat[key][0][0]:
-            if 'Name' in str(j.dtype) and 'vibration_1' in j[0]['Name']:
-                idx = np.argwhere(j[0]['Name'] == 'vibration_1')
+            if 'Name' in str(j.dtype) and sensor_mode in j[0]['Name']:
+                idx = np.argwhere(j[0]['Name'] == sensor_mode)
                 raw_train_signals.append(j[0]['Data'][idx][0][0][0])
                 break
     
@@ -119,8 +134,8 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
             key = f.replace('.mat', '')
             sig = None
             for j in mat[key][0][0]:
-                if 'Name' in str(j.dtype) and 'vibration_1' in j[0]['Name']:
-                    idx = np.argwhere(j[0]['Name'] == 'vibration_1')
+                if 'Name' in str(j.dtype) and sensor_mode in j[0]['Name']:
+                    idx = np.argwhere(j[0]['Name'] == sensor_mode)
                     sig = j[0]['Data'][idx][0][0][0]
                     break
             if sig is None:
@@ -156,7 +171,10 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
 
     n_sensor = 1 
 
-    print(f'📈 [Multi-Domain OCC] Target Settings: {loads}')
+    print(f'📈 [Multi-Domain OCC] Mode: {mode}')
+    print(f'   - Source Settings: {source_loads}')
+    print(f'   - Target Settings: {target_loads}')
+    print(f'   - Sensor Mode: {sensor_mode}')
     if exclude_ids:
         print(f'   - Excluded Bearing IDs: {sorted(exclude_ids)}')
     print(f'   - Total Train Windows: {len(train_x)} | Val Windows: {len(val_x)} | Test Windows: {len(test_x)}')

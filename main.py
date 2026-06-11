@@ -2,7 +2,7 @@
 import os
 import argparse
 import time
-from datetime import datetime
+import re
 import torch
 from models.MTGFLOW import MTGFLOW
 import numpy as np
@@ -34,7 +34,12 @@ parser.add_argument('--sampling_rate', type=float, default=1.0,
                     help='Sampling rate in samples/sec. Used to estimate realtime inference requirements.')
 
 # 🚀 [수정 포인트 1] 파더보른 하중 조건 폴더 지정을 위한 인자 추가
-parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='Paderborn operational setting directories')
+parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='Paderborn operational setting directories (backward-compatible pooled default).')
+parser.add_argument('--train_load_setting', '--source_load_setting', dest='source_load_setting', nargs='+', default=None,
+                    help='Paderborn source operational settings used for train/val splits.')
+parser.add_argument('--test_load_setting', '--target_load_setting', dest='target_load_setting', nargs='+', default=None,
+                    help='Paderborn target operational settings used for test splits.')
+parser.add_argument('--sensor_mode', type=str, default='vibration_1', help='Paderborn sensor channel name to load from .mat files.')
 parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], help='Paderborn normal bearing IDs for training.')
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
@@ -52,14 +57,63 @@ args.cuda = torch.cuda.is_available()
 device = torch.device("cuda" if args.cuda else "cpu")
 
 
-def build_paderborn_run_name():
-    return datetime.now().strftime('%Y%m%d_%H%M%S')
+def normalize_cli_list(values):
+    normalized = []
+    for item in values or []:
+        normalized.extend(part.strip() for part in str(item).split(',') if part.strip())
+    return normalized
+
+
+def compact_paderborn_settings(settings):
+    pieces = []
+    all_s_aliases = True
+    for setting in settings:
+        match = re.fullmatch(r'[sS](\d+)', setting)
+        if match:
+            pieces.append(match.group(1))
+        else:
+            all_s_aliases = False
+            pieces.append(re.sub(r'[^A-Za-z0-9]+', '', setting))
+    if all_s_aliases and pieces:
+        return 'S' + ''.join(pieces)
+    return '_'.join(pieces) if pieces else 'none'
+
+
+def sensor_mode_suffix(sensor_mode):
+    return 'vib' if sensor_mode.startswith('vibration') else re.sub(r'[^A-Za-z0-9]+', '', sensor_mode)
+
+
+def resolve_paderborn_settings(args):
+    load_settings = normalize_cli_list(args.load_setting)
+    source_settings = normalize_cli_list(args.source_load_setting) if args.source_load_setting is not None else list(load_settings)
+    target_settings = normalize_cli_list(args.target_load_setting) if args.target_load_setting is not None else list(load_settings)
+    mode = 'pooled' if args.source_load_setting is None and args.target_load_setting is None else 'cross-domain'
+    return source_settings, target_settings, mode
+
+
+def build_paderborn_run_name(args):
+    source_settings, target_settings, mode = resolve_paderborn_settings(args)
+    sensor_suffix = sensor_mode_suffix(args.sensor_mode)
+    if mode == 'pooled':
+        return f"{compact_paderborn_settings(source_settings)}_A_{sensor_suffix}_pooled"
+    return f"{compact_paderborn_settings(source_settings)}_to_{compact_paderborn_settings(target_settings)}_A_{sensor_suffix}"
+
+
+def build_paderborn_metadata(args):
+    source_settings, target_settings, mode = resolve_paderborn_settings(args)
+    return {
+        'load_setting': normalize_cli_list(args.load_setting),
+        'source_load_setting': source_settings,
+        'target_load_setting': target_settings,
+        'sensor_mode': args.sensor_mode,
+        'mode': mode,
+    }
 
 
 def resolve_save_path(args):
     if args.name.lower() == 'paderborn':
         if not args.run_name:
-            args.run_name = build_paderborn_run_name()
+            args.run_name = build_paderborn_run_name(args)
         return os.path.join('results', 'Paderborn', args.run_name)
     return os.path.join(args.output_dir, args.name)
 
@@ -68,7 +122,13 @@ for seed in [2026]:
     args.seed = seed
     print(args)
     if args.name.lower() == 'paderborn':
-        print(f"Paderborn run_name: {args.run_name or '<auto>'}")
+        if not args.run_name:
+            args.run_name = build_paderborn_run_name(args)
+        paderborn_metadata = build_paderborn_metadata(args)
+        print(f"Paderborn run_name: {args.run_name}")
+        print(f"Mode: {paderborn_metadata['mode']}")
+        print(f"Source Settings: {paderborn_metadata['source_load_setting']}")
+        print(f"Target Settings: {paderborn_metadata['target_load_setting']}")
     import random
     import numpy as np
     random.seed(args.seed)
@@ -105,6 +165,9 @@ for seed in [2026]:
         train_loader, val_loader, test_loader, n_sensor = loader_Paderborn_OCC(
             root="/home/dayoon/DCP/Data/Paderborn",
             loads=args.load_setting,               # 스크립트에서 넘겨받은 하중 조건 세팅 주입
+            source_loads=paderborn_metadata['source_load_setting'],
+            target_loads=paderborn_metadata['target_load_setting'],
+            sensor_mode=args.sensor_mode,
             batch_size=args.batch_size,
             window_size=args.window_size,
             stride_size=args.stride_size,
@@ -175,6 +238,7 @@ for seed in [2026]:
                     'model': model.state_dict(),
                     'run_name': args.run_name,
                     'args': vars(args),
+                    'paderborn_metadata': build_paderborn_metadata(args),
                 }, os.path.join(save_path, 'model.pth'))
 
             epoch_wall_clock_sec = time.perf_counter() - epoch_start_time

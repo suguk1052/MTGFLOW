@@ -38,6 +38,13 @@ parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], 
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
 parser.add_argument('--exclude_ids', nargs='*', default=[], help='Paderborn bearing IDs to exclude from train, validation, and test splits.')
+parser.add_argument(
+    '--sensor_mode',
+    type=str,
+    default='vib',
+    choices=['vib', 'mcs', 'vib_mcs'],
+    help='Paderborn sensor selection: vib, mcs, or vib_mcs.'
+)
 parser.add_argument('--threshold_percentile', type=float, default=95, help='Percentile of validation normal scores for label-free thresholding.')
 
 parser.add_argument('--batch_size', type=int, default=512)
@@ -104,7 +111,7 @@ checkpoint_path = resolve_checkpoint_path(args)
 from Dataset import load_smd_smap_msl, loader_SWat, loader_WADI, loader_PSM, loader_WADI_OCC
 
 # 🚀 [수정 포인트 2] 우리가 작성한 파더보른 OCC 로더 함수 임포트
-from Dataset.paderborn import loader_Paderborn_OCC
+from Dataset.paderborn import get_sensor_names, loader_Paderborn_OCC
 
 if args.name == 'SWaT':
     train_loader, val_loader, test_loader, n_sensor = loader_SWat(args.data_dir, \
@@ -133,7 +140,8 @@ elif args.name.lower() == 'paderborn':
         train_ids=args.train_ids,
         val_ids=args.val_ids,
         test_norm_ids=args.test_norm_ids,
-        exclude_ids=args.exclude_ids
+        exclude_ids=args.exclude_ids,
+        sensor_mode=args.sensor_mode
     )
 else:
     raise ValueError(f'Unsupported dataset name: {args.name}')
@@ -143,7 +151,32 @@ model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden,
 model = model.to(device)
 
 print(f'Loading checkpoint from {checkpoint_path}')
-checkpoint = torch.load(checkpoint_path)
+checkpoint = torch.load(checkpoint_path, map_location=device)
+
+if args.name.lower() == 'paderborn':
+    expected_sensor_names = get_sensor_names(args.sensor_mode)
+    checkpoint_sensor_mode = checkpoint.get('sensor_mode')
+    checkpoint_sensor_names = checkpoint.get('sensor_names')
+    checkpoint_n_sensor = checkpoint.get('n_sensor')
+
+    if checkpoint_sensor_mode is None or checkpoint_sensor_names is None or checkpoint_n_sensor is None:
+        print(
+            "⚠️ Warning: checkpoint has no Paderborn sensor metadata. "
+            "Make sure --sensor_mode matches the training run."
+        )
+    elif (
+        checkpoint_sensor_mode != args.sensor_mode
+        or list(checkpoint_sensor_names) != expected_sensor_names
+        or int(checkpoint_n_sensor) != int(n_sensor)
+    ):
+        raise ValueError(
+            "Paderborn sensor configuration mismatch: "
+            f"checkpoint sensor_mode={checkpoint_sensor_mode}, "
+            f"sensor_names={checkpoint_sensor_names}, n_sensor={checkpoint_n_sensor}; "
+            f"current sensor_mode={args.sensor_mode}, "
+            f"sensor_names={expected_sensor_names}, n_sensor={n_sensor}."
+        )
+
 model.load_state_dict(checkpoint['model'])
 
 
@@ -239,6 +272,8 @@ if args.name.lower() == 'paderborn':
             'val_ids': list(args.val_ids),
             'test_norm_ids': list(args.test_norm_ids),
             'exclude_ids': list(args.exclude_ids),
+            'sensor_mode': args.sensor_mode,
+            'sensor_names': get_sensor_names(args.sensor_mode),
         },
         'model_config': {
             'model': args.model,

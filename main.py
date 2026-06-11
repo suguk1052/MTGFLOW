@@ -2,7 +2,6 @@
 import os
 import argparse
 import time
-import re
 import torch
 from models.MTGFLOW import MTGFLOW
 import numpy as np
@@ -15,7 +14,7 @@ parser.add_argument('--data_dir', type=str,
 parser.add_argument('--output_dir', type=str, 
                     default='./checkpoint/')
 parser.add_argument('--run_name', type=str, default=None,
-                    help='Paderborn run name. If omitted, generated from timestamp.')
+                    help='Paderborn run name. Required for Paderborn runs.')
 parser.add_argument('--name', default='SWaT', help='the name of dataset')
 
 parser.add_argument('--graph', type=str, default='None')
@@ -35,10 +34,10 @@ parser.add_argument('--sampling_rate', type=float, default=1.0,
 
 # 🚀 [수정 포인트 1] 파더보른 하중 조건 폴더 지정을 위한 인자 추가
 parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='Paderborn operational setting directories (backward-compatible pooled default).')
-parser.add_argument('--train_load_setting', '--source_load_setting', dest='source_load_setting', nargs='+', default=None,
-                    help='Paderborn source operational settings used for train/val splits.')
-parser.add_argument('--test_load_setting', '--target_load_setting', dest='target_load_setting', nargs='+', default=None,
-                    help='Paderborn target operational settings used for test splits.')
+parser.add_argument('--train_load_setting', nargs='+', default=None,
+                    help='Paderborn operational settings used for train/val splits.')
+parser.add_argument('--test_load_setting', nargs='+', default=None,
+                    help='Paderborn operational settings used for test splits.')
 parser.add_argument('--sensor_mode', type=str, default='vibration_1', help='Paderborn sensor channel name to load from .mat files.')
 parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], help='Paderborn normal bearing IDs for training.')
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
@@ -64,56 +63,45 @@ def normalize_cli_list(values):
     return normalized
 
 
-def compact_paderborn_settings(settings):
-    pieces = []
-    all_s_aliases = True
-    for setting in settings:
-        match = re.fullmatch(r'[sS](\d+)', setting)
-        if match:
-            pieces.append(match.group(1))
-        else:
-            all_s_aliases = False
-            pieces.append(re.sub(r'[^A-Za-z0-9]+', '', setting))
-    if all_s_aliases and pieces:
-        return 'S' + ''.join(pieces)
-    return '_'.join(pieces) if pieces else 'none'
+def configure_paderborn_args(args):
+    args.load_setting = normalize_cli_list(args.load_setting)
+    if (args.train_load_setting is None) != (args.test_load_setting is None):
+        raise ValueError('Paderborn cross-domain mode requires both --train_load_setting and --test_load_setting.')
 
+    if args.train_load_setting is None and args.test_load_setting is None:
+        mode = 'pooled'
+        train_settings = list(args.load_setting)
+        test_settings = list(args.load_setting)
+    else:
+        mode = 'cross-domain'
+        args.train_load_setting = normalize_cli_list(args.train_load_setting)
+        args.test_load_setting = normalize_cli_list(args.test_load_setting)
+        train_settings = list(args.train_load_setting)
+        test_settings = list(args.test_load_setting)
 
-def sensor_mode_suffix(sensor_mode):
-    return 'vib' if sensor_mode.startswith('vibration') else re.sub(r'[^A-Za-z0-9]+', '', sensor_mode)
-
-
-def resolve_paderborn_settings(args):
-    load_settings = normalize_cli_list(args.load_setting)
-    source_settings = normalize_cli_list(args.source_load_setting) if args.source_load_setting is not None else list(load_settings)
-    target_settings = normalize_cli_list(args.target_load_setting) if args.target_load_setting is not None else list(load_settings)
-    mode = 'pooled' if args.source_load_setting is None and args.target_load_setting is None else 'cross-domain'
-    return source_settings, target_settings, mode
-
-
-def build_paderborn_run_name(args):
-    source_settings, target_settings, mode = resolve_paderborn_settings(args)
-    sensor_suffix = sensor_mode_suffix(args.sensor_mode)
-    if mode == 'pooled':
-        return f"{compact_paderborn_settings(source_settings)}_A_{sensor_suffix}_pooled"
-    return f"{compact_paderborn_settings(source_settings)}_to_{compact_paderborn_settings(target_settings)}_A_{sensor_suffix}"
+    return mode, train_settings, test_settings
 
 
 def build_paderborn_metadata(args):
-    source_settings, target_settings, mode = resolve_paderborn_settings(args)
     return {
-        'load_setting': normalize_cli_list(args.load_setting),
-        'source_load_setting': source_settings,
-        'target_load_setting': target_settings,
+        'run_name': args.run_name,
+        'load_setting': list(args.load_setting),
+        'train_load_setting': None if args.train_load_setting is None else list(args.train_load_setting),
+        'test_load_setting': None if args.test_load_setting is None else list(args.test_load_setting),
         'sensor_mode': args.sensor_mode,
-        'mode': mode,
+        'train_ids': list(args.train_ids),
+        'val_ids': list(args.val_ids),
+        'test_norm_ids': list(args.test_norm_ids),
+        'exclude_ids': list(args.exclude_ids),
+        'window_size': int(args.window_size),
+        'stride_size': int(args.stride_size),
+        'sampling_rate': float(args.sampling_rate),
     }
-
 
 def resolve_save_path(args):
     if args.name.lower() == 'paderborn':
         if not args.run_name:
-            args.run_name = build_paderborn_run_name(args)
+            raise ValueError('Paderborn training requires --run_name.')
         return os.path.join('results', 'Paderborn', args.run_name)
     return os.path.join(args.output_dir, args.name)
 
@@ -123,12 +111,12 @@ for seed in [2026]:
     print(args)
     if args.name.lower() == 'paderborn':
         if not args.run_name:
-            args.run_name = build_paderborn_run_name(args)
-        paderborn_metadata = build_paderborn_metadata(args)
+            raise ValueError('Paderborn training requires --run_name.')
+        paderborn_mode, train_settings, test_settings = configure_paderborn_args(args)
         print(f"Paderborn run_name: {args.run_name}")
-        print(f"Mode: {paderborn_metadata['mode']}")
-        print(f"Source Settings: {paderborn_metadata['source_load_setting']}")
-        print(f"Target Settings: {paderborn_metadata['target_load_setting']}")
+        print(f"Mode: {paderborn_mode}")
+        print(f"Train Settings: {train_settings}")
+        print(f"Test Settings: {test_settings}")
     import random
     import numpy as np
     random.seed(args.seed)
@@ -165,8 +153,8 @@ for seed in [2026]:
         train_loader, val_loader, test_loader, n_sensor = loader_Paderborn_OCC(
             root="/home/dayoon/DCP/Data/Paderborn",
             loads=args.load_setting,               # 스크립트에서 넘겨받은 하중 조건 세팅 주입
-            source_loads=paderborn_metadata['source_load_setting'],
-            target_loads=paderborn_metadata['target_load_setting'],
+            train_loads=args.train_load_setting,
+            test_loads=args.test_load_setting,
             sensor_mode=args.sensor_mode,
             batch_size=args.batch_size,
             window_size=args.window_size,

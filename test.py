@@ -35,10 +35,10 @@ parser.add_argument('--sampling_rate', type=float, default=1.0,
 
 # 🚀 [수정 포인트 1] 파더보른 하중 조건 폴더 지정을 위한 인자 추가
 parser.add_argument('--load_setting', nargs='+', default=['N15_M07_F10'], help='Paderborn operational setting directories (backward-compatible pooled default).')
-parser.add_argument('--train_load_setting', '--source_load_setting', dest='source_load_setting', nargs='+', default=None,
-                    help='Paderborn source operational settings used for train/val splits.')
-parser.add_argument('--test_load_setting', '--target_load_setting', dest='target_load_setting', nargs='+', default=None,
-                    help='Paderborn target operational settings used for test splits.')
+parser.add_argument('--train_load_setting', nargs='+', default=None,
+                    help='Paderborn operational settings used for train/val splits.')
+parser.add_argument('--test_load_setting', nargs='+', default=None,
+                    help='Paderborn operational settings used for test splits.')
 parser.add_argument('--sensor_mode', type=str, default='vibration_1', help='Paderborn sensor channel name to load from .mat files.')
 parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], help='Paderborn normal bearing IDs for training.')
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
@@ -65,51 +65,66 @@ def normalize_cli_list(values):
     return normalized
 
 
-def resolve_paderborn_settings(args):
-    load_settings = normalize_cli_list(args.load_setting)
-    source_settings = normalize_cli_list(args.source_load_setting) if args.source_load_setting is not None else list(load_settings)
-    target_settings = normalize_cli_list(args.target_load_setting) if args.target_load_setting is not None else list(load_settings)
-    mode = 'pooled' if args.source_load_setting is None and args.target_load_setting is None else 'cross-domain'
-    return source_settings, target_settings, mode
+def configure_paderborn_args(args):
+    args.load_setting = normalize_cli_list(args.load_setting)
+    if (args.train_load_setting is None) != (args.test_load_setting is None):
+        raise ValueError('Paderborn cross-domain mode requires both --train_load_setting and --test_load_setting.')
+
+    if args.train_load_setting is None and args.test_load_setting is None:
+        mode = 'pooled'
+        train_settings = list(args.load_setting)
+        test_settings = list(args.load_setting)
+    else:
+        mode = 'cross-domain'
+        args.train_load_setting = normalize_cli_list(args.train_load_setting)
+        args.test_load_setting = normalize_cli_list(args.test_load_setting)
+        train_settings = list(args.train_load_setting)
+        test_settings = list(args.test_load_setting)
+
+    return mode, train_settings, test_settings
 
 
 def build_paderborn_metadata(args):
-    source_settings, target_settings, mode = resolve_paderborn_settings(args)
     return {
-        'load_setting': normalize_cli_list(args.load_setting),
-        'source_load_setting': source_settings,
-        'target_load_setting': target_settings,
+        'run_name': args.run_name,
+        'load_setting': list(args.load_setting),
+        'train_load_setting': None if args.train_load_setting is None else list(args.train_load_setting),
+        'test_load_setting': None if args.test_load_setting is None else list(args.test_load_setting),
         'sensor_mode': args.sensor_mode,
-        'mode': mode,
+        'train_ids': list(args.train_ids),
+        'val_ids': list(args.val_ids),
+        'test_norm_ids': list(args.test_norm_ids),
+        'exclude_ids': list(args.exclude_ids),
+        'window_size': int(args.window_size),
+        'stride_size': int(args.stride_size),
+        'sampling_rate': float(args.sampling_rate),
     }
 
 
-def option_was_provided(*option_names):
-    return any(argv == opt or argv.startswith(opt + '=') for argv in sys.argv[1:] for opt in option_names)
+def option_was_provided(option_name):
+    return any(argv == option_name or argv.startswith(option_name + '=') for argv in sys.argv[1:])
 
 
 def reconcile_paderborn_args_with_checkpoint(args, checkpoint):
     metadata = checkpoint.get('paderborn_metadata')
     if not metadata:
-        return build_paderborn_metadata(args)
+        return configure_paderborn_args(args)
 
-    explicit = {
-        'load_setting': option_was_provided('--load_setting'),
-        'source_load_setting': option_was_provided('--train_load_setting', '--source_load_setting'),
-        'target_load_setting': option_was_provided('--test_load_setting', '--target_load_setting'),
-        'sensor_mode': option_was_provided('--sensor_mode'),
-    }
-    current = build_paderborn_metadata(args)
-    for key in ('load_setting', 'source_load_setting', 'target_load_setting', 'sensor_mode'):
-        if explicit[key] and current.get(key) != metadata.get(key):
-            print(f"⚠️ Warning: CLI {key}={current.get(key)} differs from checkpoint {key}={metadata.get(key)}. Using checkpoint metadata for reproducible evaluation.")
+    configure_paderborn_args(args)
+    current_metadata = build_paderborn_metadata(args)
+    for key in ('load_setting', 'train_load_setting', 'test_load_setting', 'sensor_mode'):
+        if option_was_provided('--' + key) and current_metadata.get(key) != metadata.get(key):
+            print(f"⚠️ Warning: CLI {key}={current_metadata.get(key)} differs from checkpoint {key}={metadata.get(key)}. Using checkpoint metadata for reproducible evaluation.")
 
     args.load_setting = list(metadata.get('load_setting', args.load_setting))
-    args.source_load_setting = list(metadata.get('source_load_setting', []))
-    args.target_load_setting = list(metadata.get('target_load_setting', []))
+    args.train_load_setting = metadata.get('train_load_setting')
+    args.test_load_setting = metadata.get('test_load_setting')
     args.sensor_mode = metadata.get('sensor_mode', args.sensor_mode)
-    return build_paderborn_metadata(args)
-
+    args.train_ids = list(metadata.get('train_ids', args.train_ids))
+    args.val_ids = list(metadata.get('val_ids', args.val_ids))
+    args.test_norm_ids = list(metadata.get('test_norm_ids', args.test_norm_ids))
+    args.exclude_ids = list(metadata.get('exclude_ids', args.exclude_ids))
+    return configure_paderborn_args(args)
 
 def resolve_checkpoint_path(args):
     if args.name.lower() == 'paderborn':
@@ -161,12 +176,11 @@ def compute_realtime_stats(num_windows, model_only_sec, end_to_end_sec, args):
 checkpoint_path = resolve_checkpoint_path(args)
 print(f'Loading checkpoint metadata from {checkpoint_path}')
 checkpoint = torch.load(checkpoint_path, map_location=device)
-paderborn_metadata = None
 if args.name.lower() == 'paderborn':
-    paderborn_metadata = reconcile_paderborn_args_with_checkpoint(args, checkpoint)
-    print(f"Mode: {paderborn_metadata['mode']}")
-    print(f"Source Settings: {paderborn_metadata['source_load_setting']}")
-    print(f"Target Settings: {paderborn_metadata['target_load_setting']}")
+    paderborn_mode, train_settings, test_settings = reconcile_paderborn_args_with_checkpoint(args, checkpoint)
+    print(f"Mode: {paderborn_mode}")
+    print(f"Train Settings: {train_settings}")
+    print(f"Test Settings: {test_settings}")
 
 from Dataset import load_smd_smap_msl, loader_SWat, loader_WADI, loader_PSM, loader_WADI_OCC
 
@@ -194,8 +208,8 @@ elif args.name.lower() == 'paderborn':
     train_loader, val_loader, test_loader, n_sensor = loader_Paderborn_OCC(
         root="/home/dayoon/DCP/Data/Paderborn", 
         loads=args.load_setting,
-        source_loads=paderborn_metadata['source_load_setting'],
-        target_loads=paderborn_metadata['target_load_setting'],
+        train_loads=args.train_load_setting,
+        test_loads=args.test_load_setting,
         sensor_mode=args.sensor_mode,
         batch_size=args.batch_size,
         window_size=args.window_size,
@@ -300,10 +314,10 @@ if args.name.lower() == 'paderborn':
         'paderborn_config': {
             'root': '/home/dayoon/DCP/Data/Paderborn',
             'loads': list(args.load_setting),
-            'source_load_setting': list(paderborn_metadata['source_load_setting']),
-            'target_load_setting': list(paderborn_metadata['target_load_setting']),
+            'train_load_setting': None if args.train_load_setting is None else list(args.train_load_setting),
+            'test_load_setting': None if args.test_load_setting is None else list(args.test_load_setting),
             'sensor_mode': args.sensor_mode,
-            'mode': paderborn_metadata['mode'],
+            'mode': paderborn_mode,
             'batch_size': int(args.batch_size),
             'window_size': int(args.window_size),
             'stride_size': int(args.stride_size),

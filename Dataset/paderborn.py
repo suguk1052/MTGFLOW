@@ -30,8 +30,8 @@ class Paderborn_dataset(Dataset):
 
 def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn", 
                          loads=["N15_M07_F10"],
-                         source_loads=None,
-                         target_loads=None,
+                         train_loads=None,
+                         test_loads=None,
                          batch_size=64, 
                          window_size=2048, 
                          stride_size=1024, 
@@ -45,10 +45,10 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     여러 세팅 폴더를 동시에 읽어와 통합 학습/추론이 가능한 OCC 데이터 로더.
 
     기본값은 기존 pooled multi-setting 동작과 동일하게 ``loads``의 모든 setting에서
-    train/val/test를 모두 수집한다. ``source_loads`` 또는 ``target_loads``가 주어지면
-    train/val은 source setting에서만, test normal/fault는 target setting에서만 수집하는
-    cross-domain split으로 동작한다. StandardScaler는 항상 source train normal 파일에만
-    fit되고, val/test에는 동일 scaler의 transform만 적용된다.
+    train/val/test를 모두 수집한다. ``train_loads``와 ``test_loads``가 주어지면
+    train/val은 train setting에서만, test normal/fault는 test setting에서만 수집하는
+    cross-domain split으로 동작한다. StandardScaler는 항상 train setting의 train normal
+    파일에만 fit되고, val/test에는 동일 scaler의 transform만 적용된다.
     """
     
     def normalize_id_list(ids):
@@ -62,9 +62,16 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     test_norm_ids = set(normalize_id_list(test_norm_ids))
     exclude_ids = set(normalize_id_list(exclude_ids))
     loads = normalize_id_list(loads)
-    source_loads = normalize_id_list(source_loads) if source_loads is not None else list(loads)
-    target_loads = normalize_id_list(target_loads) if target_loads is not None else list(loads)
-    mode = 'pooled' if source_loads == target_loads and source_loads == loads else 'cross-domain'
+    if (train_loads is None) != (test_loads is None):
+        raise ValueError("--train_load_setting and --test_load_setting must be provided together for cross-domain Paderborn loading.")
+    if train_loads is None and test_loads is None:
+        mode = 'pooled'
+        train_loads = list(loads)
+        test_loads = list(loads)
+    else:
+        mode = 'cross-domain'
+        train_loads = normalize_id_list(train_loads)
+        test_loads = normalize_id_list(test_loads)
 
     def extract_bearing_id(filename):
         match = re.search(r'(K[A-Z]?\d{2,3})(?:_|\.)', filename)
@@ -90,15 +97,15 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
                     continue
                 yield setting_path, f, bearing_id
 
-    # 🚀 Step 1: source settings에서는 train/val만, target settings에서는 test만 수집
-    for setting_path, f, bearing_id in iter_setting_files(source_loads):
+    # 🚀 Step 1: train settings에서는 train/val만, test settings에서는 test만 수집
+    for setting_path, f, bearing_id in iter_setting_files(train_loads):
         file_info = (setting_path, f)
         if bearing_id in train_ids:
             train_file_tuples.append(file_info)
         elif bearing_id in val_ids:
             val_file_tuples.append(file_info)
 
-    for setting_path, f, bearing_id in iter_setting_files(target_loads):
+    for setting_path, f, bearing_id in iter_setting_files(test_loads):
         file_info = (setting_path, f)
         if bearing_id in test_norm_ids:
             test_normal_file_tuples.append(file_info)
@@ -171,13 +178,17 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
 
     n_sensor = 1 
 
-    print(f'📈 [Multi-Domain OCC] Mode: {mode}')
-    print(f'   - Source Settings: {source_loads}')
-    print(f'   - Target Settings: {target_loads}')
-    print(f'   - Sensor Mode: {sensor_mode}')
+    print(f'Mode: {mode}')
+    print(f'Train Settings: {train_loads}')
+    print(f'Test Settings: {test_loads}')
+    print(f'Sensor Mode: {sensor_mode}')
+    print(f'Sensor Names: {[sensor_mode]}')
+    print(f'n_sensor: {n_sensor}')
     if exclude_ids:
-        print(f'   - Excluded Bearing IDs: {sorted(exclude_ids)}')
-    print(f'   - Total Train Windows: {len(train_x)} | Val Windows: {len(val_x)} | Test Windows: {len(test_x)}')
+        print(f'Excluded Bearing IDs: {sorted(exclude_ids)}')
+    print(f'Total Train Windows: {len(train_x)}')
+    print(f'Val Windows: {len(val_x)}')
+    print(f'Test Windows: {len(test_x)}')
 
     # 파이토치 데이터로더 패킹 및 반환
     train_loader = DataLoader(Paderborn_dataset(train_x, train_y, window_size, train_ids_per_window), batch_size=batch_size, shuffle=not label)

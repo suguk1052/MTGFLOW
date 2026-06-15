@@ -28,6 +28,8 @@ parser.add_argument('--hidden_size', type=int, default=32, help='Hidden layer si
 parser.add_argument('--n_hidden', type=int, default=1, help='Number of hidden layers in each MADE.')
 parser.add_argument('--input_size', type=int, default=1)
 parser.add_argument('--batch_norm', type=bool, default=False)
+parser.add_argument('--use_meta', action='store_true', help='Use normalized Paderborn operational metadata as MTGFlow context.')
+parser.add_argument('--meta_emb_dim', type=int, default=8, help='Metadata embedding dimension for context-aware MTGFlow.')
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
 parser.add_argument('--sampling_rate', type=float, default=1.0,
@@ -98,6 +100,8 @@ def build_paderborn_metadata(args):
         'window_size': int(args.window_size),
         'stride_size': int(args.stride_size),
         'sampling_rate': float(args.sampling_rate),
+        'use_meta': bool(args.use_meta),
+        'meta_emb_dim': int(args.meta_emb_dim),
     }
 
 
@@ -124,6 +128,10 @@ def reconcile_paderborn_args_with_checkpoint(args, checkpoint):
     args.val_ids = list(metadata.get('val_ids', args.val_ids))
     args.test_norm_ids = list(metadata.get('test_norm_ids', args.test_norm_ids))
     args.exclude_ids = list(metadata.get('exclude_ids', args.exclude_ids))
+    if not option_was_provided('--use_meta'):
+        args.use_meta = bool(metadata.get('use_meta', args.use_meta))
+    if not option_was_provided('--meta_emb_dim'):
+        args.meta_emb_dim = int(metadata.get('meta_emb_dim', args.meta_emb_dim))
     return configure_paderborn_args(args)
 
 def resolve_checkpoint_path(args):
@@ -161,6 +169,8 @@ def compute_realtime_stats(num_windows, model_only_sec, end_to_end_sec, args):
     )
     return {
         'sampling_rate': float(args.sampling_rate),
+        'use_meta': bool(args.use_meta),
+        'meta_emb_dim': int(args.meta_emb_dim),
         'stride_size': int(args.stride_size),
         'required_wps_for_realtime': required_wps_for_realtime,
         'total_windows': int(num_windows),
@@ -223,7 +233,7 @@ else:
     raise ValueError(f'Unsupported dataset name: {args.name}')
 
 #%%
-model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model = args.model, batch_norm=args.batch_norm)
+model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model = args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_emb_dim=args.meta_emb_dim)
 model = model.to(device)
 
 print(f'Loading checkpoint from {checkpoint_path}')
@@ -240,13 +250,14 @@ def compute_scores(loader, measure_speed=False):
     synchronize_if_cuda()
     end_to_end_start = time.perf_counter()
     with torch.no_grad():
-        for x, _, _ in loader:
-            x = x.to(device)
+        for batch in loader:
+            x = batch[0].to(device)
+            meta = batch[3].to(device) if args.use_meta and len(batch) > 3 else None
             batch_size = x.shape[0]
 
             synchronize_if_cuda()
             model_start = time.perf_counter()
-            loss_tensor = -model.test(x,)
+            loss_tensor = -model.test(x, meta)
             synchronize_if_cuda()
             model_only_sec += time.perf_counter() - model_start
 
@@ -322,6 +333,8 @@ if args.name.lower() == 'paderborn':
             'window_size': int(args.window_size),
             'stride_size': int(args.stride_size),
             'sampling_rate': float(args.sampling_rate),
+            'use_meta': bool(args.use_meta),
+            'meta_emb_dim': int(args.meta_emb_dim),
             'train_ids': list(args.train_ids),
             'val_ids': list(args.val_ids),
             'test_norm_ids': list(args.test_norm_ids),
@@ -334,6 +347,8 @@ if args.name.lower() == 'paderborn':
             'n_hidden': int(args.n_hidden),
             'input_size': int(args.input_size),
             'batch_norm': bool(args.batch_norm),
+            'use_meta': bool(args.use_meta),
+            'meta_emb_dim': int(args.meta_emb_dim),
         },
         'threshold': threshold,
         'threshold_percentile': float(args.threshold_percentile),
@@ -356,6 +371,8 @@ else:
             'window_size': int(args.window_size),
             'stride_size': int(args.stride_size),
             'sampling_rate': float(args.sampling_rate),
+            'use_meta': bool(args.use_meta),
+            'meta_emb_dim': int(args.meta_emb_dim),
             'train_split': float(args.train_split),
         },
     })

@@ -27,6 +27,8 @@ parser.add_argument('--hidden_size', type=int, default=32, help='Hidden layer si
 parser.add_argument('--n_hidden', type=int, default=1, help='Number of hidden layers in each MADE.')
 parser.add_argument('--input_size', type=int, default=1)
 parser.add_argument('--batch_norm', type=bool, default=False)
+parser.add_argument('--use_meta', action='store_true', help='Use normalized Paderborn operational metadata as MTGFlow context.')
+parser.add_argument('--meta_emb_dim', type=int, default=8, help='Metadata embedding dimension for context-aware MTGFlow.')
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
 parser.add_argument('--sampling_rate', type=float, default=1.0,
@@ -96,6 +98,8 @@ def build_paderborn_metadata(args):
         'window_size': int(args.window_size),
         'stride_size': int(args.stride_size),
         'sampling_rate': float(args.sampling_rate),
+        'use_meta': bool(args.use_meta),
+        'meta_emb_dim': int(args.meta_emb_dim),
     }
 
 def resolve_save_path(args):
@@ -166,7 +170,7 @@ for seed in [2026]:
         )
 
     # %%
-    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm)
+    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_emb_dim=args.meta_emb_dim)
     model = model.to(device)
 
     # %%
@@ -194,11 +198,12 @@ for seed in [2026]:
         loss_train = []
 
         model.train()
-        for x, _, idx in train_loader:
-            x = x.to(device)
+        for batch in train_loader:
+            x = batch[0].to(device)
+            meta = batch[3].to(device) if args.use_meta and len(batch) > 3 else None
 
             optimizer.zero_grad()
-            loss = -model(x,)
+            loss = -model(x, meta)
 
             total_loss = loss
 
@@ -213,9 +218,10 @@ for seed in [2026]:
             loss_val = []
             model.eval()
             with torch.no_grad():
-                for x, _, idx in val_loader:
-                    x = x.to(device)
-                    loss = -model.test(x, ).cpu().numpy()
+                for batch in val_loader:
+                    x = batch[0].to(device)
+                    meta = batch[3].to(device) if args.use_meta and len(batch) > 3 else None
+                    loss = -model.test(x, meta).cpu().numpy()
                     loss_val.append(loss)
             loss_val = np.concatenate(loss_val)
             mean_val_loss = np.mean(loss_val)
@@ -235,10 +241,11 @@ for seed in [2026]:
         else:
             loss_test = []
             with torch.no_grad():
-                for x, _, idx in test_loader:
+                for batch in test_loader:
 
-                    x = x.to(device)
-                    loss = -model.test(x, ).cpu().numpy()
+                    x = batch[0].to(device)
+                    meta = batch[3].to(device) if args.use_meta and len(batch) > 3 else None
+                    loss = -model.test(x, meta).cpu().numpy()
                     loss_test.append(loss)
             loss_test = np.concatenate(loss_test)
 

@@ -128,21 +128,45 @@ class ScaleDotProductAttention(nn.Module):
 
 class MTGFLOW(nn.Module):
 
-    def __init__ (self, n_blocks, input_size, hidden_size, n_hidden, window_size, n_sensor, dropout = 0.1, model="MAF", batch_norm=True):
+    def __init__ (self, n_blocks, input_size, hidden_size, n_hidden, window_size, n_sensor, dropout = 0.1, model="MAF", batch_norm=True, use_meta=False, meta_input_dim=3, meta_emb_dim=8):
         super(MTGFLOW, self).__init__()
 
         self.rnn = nn.LSTM(input_size=input_size,hidden_size=hidden_size,batch_first=True, dropout=dropout)
         self.gcn = GNN(input_size=hidden_size, hidden_size=hidden_size)
+        self.use_meta = use_meta
+        self.meta_emb_dim = meta_emb_dim
+        if self.use_meta:
+            self.meta_encoder = nn.Sequential(
+                nn.Linear(meta_input_dim, 16),
+                nn.ReLU(),
+                nn.Linear(16, meta_emb_dim),
+            )
+        else:
+            self.meta_encoder = None
+        cond_dim = hidden_size + meta_emb_dim if self.use_meta else hidden_size
         if model=="MAF":
             # self.nf = MAF(n_blocks, n_sensor, input_size, hidden_size, n_hidden, cond_label_size=hidden_size, batch_norm=batch_norm,activation='tanh', mode = 'zero')
-            self.nf = MAF(n_blocks, n_sensor, input_size, hidden_size, n_hidden, cond_label_size=hidden_size, batch_norm=batch_norm,activation='tanh')
+            self.nf = MAF(n_blocks, n_sensor, input_size, hidden_size, n_hidden, cond_label_size=cond_dim, batch_norm=batch_norm,activation='tanh')
       
         self.attention = ScaleDotProductAttention(window_size*input_size)
-    def forward(self, x, ):
+    def forward(self, x, meta=None):
 
-        return self.test(x, ).mean()
+        return self.test(x, meta).mean()
 
-    def test(self, x, ):
+    def _append_meta_condition(self, h, meta, full_shape):
+        if not self.use_meta:
+            return h.reshape((-1, h.shape[3]))
+        if meta is None:
+            raise ValueError("MTGFLOW was created with use_meta=True, but no metadata tensor was provided.")
+        meta = meta.to(device=h.device, dtype=h.dtype)
+        meta_emb = self.meta_encoder(meta)
+        meta_emb = meta_emb.view(full_shape[0], 1, 1, self.meta_emb_dim)
+        meta_emb = meta_emb.expand(full_shape[0], full_shape[1], full_shape[2], self.meta_emb_dim)
+        h_flat = h.reshape((-1, h.shape[3]))
+        meta_flat = meta_emb.reshape((-1, self.meta_emb_dim))
+        return torch.cat([h_flat, meta_flat], dim=-1)
+
+    def test(self, x, meta=None):
         # x: N X K X L X D 
         full_shape = x.shape
         graph,_ = self.attention(x)
@@ -156,7 +180,7 @@ class MTGFLOW(nn.Module):
         h = self.gcn(h, graph)
 
         # reshappe N*K*L,H
-        h = h.reshape((-1,h.shape[3]))
+        h = self._append_meta_condition(h, meta, full_shape)
         x = x.reshape((-1,full_shape[3]))
         log_prob = self.nf.log_prob(x, full_shape[1], full_shape[2], h).reshape([full_shape[0],-1])#
         log_prob = log_prob.mean(dim=1)
@@ -166,7 +190,7 @@ class MTGFLOW(nn.Module):
     def get_graph(self):
         return self.graph
 
-    def locate(self, x, ):
+    def locate(self, x, meta=None):
         # x: N X K X L X D 
         full_shape = x.shape
 
@@ -181,7 +205,7 @@ class MTGFLOW(nn.Module):
         h = self.gcn(h, graph)
 
         # reshappe N*K*L,H
-        h = h.reshape((-1,h.shape[3]))
+        h = self._append_meta_condition(h, meta, full_shape)
         x = x.reshape((-1,full_shape[3]))
         a = self.nf.log_prob(x, full_shape[1], full_shape[2], h)
         log_prob, z = a[0].reshape([full_shape[0],full_shape[1],-1]), a[1].reshape([full_shape[0],full_shape[1],-1])
@@ -192,7 +216,7 @@ class MTGFLOW(nn.Module):
 
 
 class test(nn.Module):
-    def __init__ (self, n_blocks, input_size, hidden_size, n_hidden, window_size, n_sensor, dropout = 0.1, model="MAF", batch_norm=True):
+    def __init__ (self, n_blocks, input_size, hidden_size, n_hidden, window_size, n_sensor, dropout = 0.1, model="MAF", batch_norm=True, use_meta=False, meta_input_dim=3, meta_emb_dim=8):
         super(test, self).__init__()
         
         if model=="MAF":
@@ -209,7 +233,7 @@ class test(nn.Module):
         log_prob = log_prob.mean(dim=1)
         return log_prob
 
-    def locate(self, x, ):
+    def locate(self, x, meta=None):
         # x: N X K X L X D 
         x = x.unsqueeze(2).unsqueeze(3)
         full_shape = x.shape

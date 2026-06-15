@@ -11,13 +11,37 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
+PADERBORN_SETTING_META = {
+    "N15_M07_F10": [1500.0, 0.7, 1000.0],
+    "N09_M07_F10": [900.0, 0.7, 1000.0],
+    "N15_M01_F10": [1500.0, 0.1, 1000.0],
+    "N15_M07_F04": [1500.0, 0.7, 400.0],
+}
+
+
+def normalize_paderborn_meta(meta):
+    rpm, torque, force = meta
+    return np.array([
+        (rpm - 900.0) / 600.0,
+        (torque - 0.1) / 0.6,
+        (force - 400.0) / 600.0,
+    ], dtype=np.float32)
+
+
+def get_paderborn_setting_meta(setting_name):
+    if setting_name not in PADERBORN_SETTING_META:
+        raise ValueError(f"Unknown Paderborn setting {setting_name}. Add it to PADERBORN_SETTING_META before using metadata context.")
+    return normalize_paderborn_meta(PADERBORN_SETTING_META[setting_name])
+
+
 class Paderborn_dataset(Dataset):
-    def __init__(self, windows, labels, window_size, ids=None) -> None:
+    def __init__(self, windows, labels, window_size, ids=None, metas=None) -> None:
         super(Paderborn_dataset, self).__init__()
         self.windows = windows  
         self.label = labels     
         self.window_size = window_size
         self.ids = np.array(ids) if ids is not None else np.array(['unknown'] * len(windows))
+        self.metas = np.asarray(metas, dtype=np.float32) if metas is not None else np.zeros((len(windows), 3), dtype=np.float32)
 
     def __len__(self):
         return len(self.windows)
@@ -25,7 +49,7 @@ class Paderborn_dataset(Dataset):
     def __getitem__(self, index):
         # [Batch, Length, 1] -> MTGFlow 규격 맞춤 [1, Length, 1]
         window_data = self.windows[index].reshape([self.window_size, -1, 1])
-        return torch.FloatTensor(window_data).transpose(0, 1), self.label[index], index
+        return torch.FloatTensor(window_data).transpose(0, 1), self.label[index], index, torch.FloatTensor(self.metas[index])
 
 
 def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn", 
@@ -135,8 +159,12 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     def extract_scaled_windows(file_tuple_list):
         extracted_windows = []
         extracted_ids = []
+        extracted_metas = []
+        setting_window_counts = {}
         for folder_path, f in file_tuple_list:
             bearing_id = extract_bearing_id(f)
+            setting_name = os.path.basename(folder_path)
+            setting_meta = get_paderborn_setting_meta(setting_name)
             mat = scipy.io.loadmat(os.path.join(folder_path, f))
             key = f.replace('.mat', '')
             sig = None
@@ -156,20 +184,23 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
             while start + window_size <= len(scaled_sig):
                 extracted_windows.append(scaled_sig[start:start + window_size])
                 extracted_ids.append(bearing_id)
+                extracted_metas.append(setting_meta)
+                setting_window_counts[setting_name] = setting_window_counts.get(setting_name, 0) + 1
                 start += stride_size
                 
         if not extracted_windows:
-            return np.empty((0, window_size)), np.array([], dtype=str)
-        return np.array(extracted_windows), np.array(extracted_ids)
+            return np.empty((0, window_size)), np.array([], dtype=str), np.empty((0, 3), dtype=np.float32), setting_window_counts
+        return np.array(extracted_windows), np.array(extracted_ids), np.array(extracted_metas, dtype=np.float32), setting_window_counts
 
     # 🚀 Step 4: 멀티 도메인 데이터셋 윈도우 가공 및 빌딩
-    train_x, train_ids_per_window = extract_scaled_windows(train_file_tuples)
-    val_x, val_ids_per_window = extract_scaled_windows(val_file_tuples)
-    test_norm_x, test_norm_ids_per_window = extract_scaled_windows(test_normal_file_tuples)
-    test_fault_x, test_fault_ids_per_window = extract_scaled_windows(test_fault_file_tuples)
+    train_x, train_ids_per_window, train_meta, train_setting_counts = extract_scaled_windows(train_file_tuples)
+    val_x, val_ids_per_window, val_meta, val_setting_counts = extract_scaled_windows(val_file_tuples)
+    test_norm_x, test_norm_ids_per_window, test_norm_meta, test_norm_setting_counts = extract_scaled_windows(test_normal_file_tuples)
+    test_fault_x, test_fault_ids_per_window, test_fault_meta, test_fault_setting_counts = extract_scaled_windows(test_fault_file_tuples)
 
     test_x = np.concatenate([test_norm_x, test_fault_x], axis=0)
     test_ids_per_window = np.concatenate([test_norm_ids_per_window, test_fault_ids_per_window], axis=0)
+    test_meta = np.concatenate([test_norm_meta, test_fault_meta], axis=0)
     
     # 이진 라벨 정의 (정상 0, 이상 1)
     train_y = np.zeros(len(train_x))
@@ -190,10 +221,25 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     print(f'Val Windows: {len(val_x)}')
     print(f'Test Windows: {len(test_x)}')
 
+    def print_setting_summary(split_name, counts):
+        print(f'{split_name} Setting Window Counts:')
+        for setting_name in sorted(counts):
+            meta = get_paderborn_setting_meta(setting_name).tolist()
+            raw_meta = PADERBORN_SETTING_META[setting_name]
+            print(f'  {setting_name}: windows={counts[setting_name]}, raw_meta={raw_meta}, normalized_meta={meta}')
+
+    print_setting_summary('Train', train_setting_counts)
+    print_setting_summary('Val', val_setting_counts)
+    merged_test_counts = {}
+    for counts in (test_norm_setting_counts, test_fault_setting_counts):
+        for setting_name, count in counts.items():
+            merged_test_counts[setting_name] = merged_test_counts.get(setting_name, 0) + count
+    print_setting_summary('Test', merged_test_counts)
+
     # 파이토치 데이터로더 패킹 및 반환
-    train_loader = DataLoader(Paderborn_dataset(train_x, train_y, window_size, train_ids_per_window), batch_size=batch_size, shuffle=not label)
-    val_loader = DataLoader(Paderborn_dataset(val_x, val_y, window_size, val_ids_per_window), batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(Paderborn_dataset(test_x, test_y, window_size, test_ids_per_window), batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(Paderborn_dataset(train_x, train_y, window_size, train_ids_per_window, train_meta), batch_size=batch_size, shuffle=not label)
+    val_loader = DataLoader(Paderborn_dataset(val_x, val_y, window_size, val_ids_per_window, val_meta), batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(Paderborn_dataset(test_x, test_y, window_size, test_ids_per_window, test_meta), batch_size=batch_size, shuffle=False)
 
     return train_loader, val_loader, test_loader, n_sensor
 

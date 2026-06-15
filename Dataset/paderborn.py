@@ -22,9 +22,9 @@ PADERBORN_SETTING_META = {
 def normalize_paderborn_meta(meta):
     rpm, torque, force = meta
     return np.array([
-        (rpm - 900.0) / 600.0,
-        (torque - 0.1) / 0.6,
-        (force - 400.0) / 600.0,
+        (rpm - 1500.0) / 1500.0,
+        (torque - 0.7) / 0.7,
+        (force - 1000.0) / 1000.0,
     ], dtype=np.float32)
 
 

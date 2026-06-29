@@ -29,6 +29,10 @@ parser.add_argument('--input_size', type=int, default=1)
 parser.add_argument('--batch_norm', type=bool, default=False)
 parser.add_argument('--use_meta', action='store_true', help='Use normalized Paderborn operational metadata as MTGFlow context.')
 parser.add_argument('--meta_emb_dim', type=int, default=8, help='Metadata embedding dimension for context-aware MTGFlow.')
+parser.add_argument('--meta_source', type=str, default='static', choices=['static', 'measured'],
+                    help='Metadata source for Paderborn: static setting metadata or measured operational signals.')
+parser.add_argument('--measured_meta_stats', type=str, default='meanstd', choices=['mean', 'meanstd'],
+                    help='Window-level statistics for measured operational metadata.')
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
 parser.add_argument('--sampling_rate', type=float, default=1.0,
@@ -84,6 +88,14 @@ def configure_paderborn_args(args):
     return mode, train_settings, test_settings
 
 
+def resolve_meta_input_dim(args):
+    if args.meta_source == 'static':
+        return 3
+    if args.measured_meta_stats == 'mean':
+        return 3
+    return 6
+
+
 def build_paderborn_metadata(args):
     return {
         'run_name': args.run_name,
@@ -99,6 +111,9 @@ def build_paderborn_metadata(args):
         'stride_size': int(args.stride_size),
         'sampling_rate': float(args.sampling_rate),
         'use_meta': bool(args.use_meta),
+        'meta_source': args.meta_source,
+        'measured_meta_stats': args.measured_meta_stats,
+        'meta_input_dim': int(resolve_meta_input_dim(args)),
         'meta_emb_dim': int(args.meta_emb_dim),
     }
 
@@ -166,11 +181,13 @@ for seed in [2026]:
             train_ids=args.train_ids,
             val_ids=args.val_ids,
             test_norm_ids=args.test_norm_ids,
-            exclude_ids=args.exclude_ids
+            exclude_ids=args.exclude_ids,
+            meta_source=args.meta_source,
+            measured_meta_stats=args.measured_meta_stats
         )
 
     # %%
-    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_emb_dim=args.meta_emb_dim)
+    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim)
     model = model.to(device)
 
     # %%

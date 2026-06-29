@@ -33,6 +33,76 @@ def get_paderborn_setting_meta(setting_name):
         raise ValueError(f"Unknown Paderborn setting {setting_name}. Add it to PADERBORN_SETTING_META before using metadata context.")
     return normalize_paderborn_meta(PADERBORN_SETTING_META[setting_name])
 
+def _sensor_name_to_str(name):
+    arr = np.asarray(name).squeeze()
+    if arr.shape == ():
+        return str(arr.item())
+    return ''.join(str(item) for item in arr.tolist())
+
+
+def extract_signal_from_mat(mat, key, sensor_name):
+    y_array = mat[key][0, 0]["Y"]
+
+    for i in range(y_array.shape[1]):
+        sensor_room = y_array[0, i]
+        name = _sensor_name_to_str(sensor_room["Name"][0])
+
+        if name == sensor_name:
+            return sensor_room["Data"].flatten()
+
+    raise ValueError(f"Sensor {sensor_name} not found in {key}")
+
+
+def _normalize_sensor_name(name):
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def _matches_measured_sensor(sensor_name, target):
+    normalized = _normalize_sensor_name(sensor_name)
+    if target == "speed":
+        return "speed" in normalized or normalized in {"n", "rpm"}
+    if target == "torque":
+        return "torque" in normalized or normalized.startswith("m")
+    if target == "force":
+        return "force" in normalized and ("radial" in normalized or normalized.startswith("fr") or normalized == "force")
+    return False
+
+
+def load_measured_operational_signals(mat_path):
+    mat = scipy.io.loadmat(mat_path)
+    key = os.path.basename(mat_path).replace(".mat", "")
+    y_array = mat[key][0, 0]["Y"]
+    signals = {}
+
+    for i in range(y_array.shape[1]):
+        sensor_room = y_array[0, i]
+        name = _sensor_name_to_str(sensor_room["Name"][0])
+        data = sensor_room["Data"].flatten()
+        for target in ("speed", "torque", "force"):
+            if target not in signals and _matches_measured_sensor(name, target):
+                signals[target] = data
+
+    missing = [target for target in ("speed", "torque", "force") if target not in signals]
+    if missing:
+        available = [_sensor_name_to_str(y_array[0, i]["Name"][0]) for i in range(y_array.shape[1])]
+        raise ValueError(f"Measured operational sensor(s) {missing} not found in {key}. Available sensors: {available}")
+
+    min_len = min(len(signals[target]) for target in ("speed", "torque", "force"))
+    return np.stack([signals[target][:min_len] for target in ("speed", "torque", "force")], axis=1).astype(np.float32)
+
+
+def summarize_measured_meta(op_signals, start, end, measured_meta_stats, vibration_sampling_rate=64000, op_sampling_rate=4000):
+    op_start = int(round(start * op_sampling_rate / vibration_sampling_rate))
+    op_end = int(round(end * op_sampling_rate / vibration_sampling_rate))
+    op_start = max(0, min(op_start, len(op_signals) - 1))
+    op_end = max(op_start + 1, min(op_end, len(op_signals)))
+    window = op_signals[op_start:op_end]
+    means = window.mean(axis=0)
+    if measured_meta_stats == "mean":
+        return means.astype(np.float32)
+    stds = window.std(axis=0)
+    return np.array([means[0], stds[0], means[1], stds[1], means[2], stds[2]], dtype=np.float32)
+
 
 class Paderborn_dataset(Dataset):
     def __init__(self, windows, labels, window_size, ids=None, metas=None) -> None:
@@ -64,7 +134,11 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
                          val_ids=['K004'], 
                          test_norm_ids=['K005', 'K006'],
                          exclude_ids=None,
-                         sensor_mode='vibration_1'):
+                         sensor_mode='vibration_1',
+                         meta_source='static',
+                         measured_meta_stats='meanstd',
+                         vibration_sampling_rate=64000,
+                         op_sampling_rate=4000):
     """
     여러 세팅 폴더를 동시에 읽어와 통합 학습/추론이 가능한 OCC 데이터 로더.
 
@@ -85,6 +159,11 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     val_ids = set(normalize_id_list(val_ids))
     test_norm_ids = set(normalize_id_list(test_norm_ids))
     exclude_ids = set(normalize_id_list(exclude_ids))
+    if meta_source not in ('static', 'measured'):
+        raise ValueError("meta_source must be one of ['static', 'measured']")
+    if measured_meta_stats not in ('mean', 'meanstd'):
+        raise ValueError("measured_meta_stats must be one of ['mean', 'meanstd']")
+    meta_input_dim = 3 if meta_source == 'static' or measured_meta_stats == 'mean' else 6
     loads = normalize_id_list(loads)
     if (train_loads is None) != (test_loads is None):
         raise ValueError("--train_load_setting and --test_load_setting must be provided together for cross-domain Paderborn loading.")
@@ -164,8 +243,10 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
         for folder_path, f in file_tuple_list:
             bearing_id = extract_bearing_id(f)
             setting_name = os.path.basename(folder_path)
-            setting_meta = get_paderborn_setting_meta(setting_name)
-            mat = scipy.io.loadmat(os.path.join(folder_path, f))
+            static_setting_meta = get_paderborn_setting_meta(setting_name)
+            mat_path = os.path.join(folder_path, f)
+            measured_signals = load_measured_operational_signals(mat_path) if meta_source == 'measured' else None
+            mat = scipy.io.loadmat(mat_path)
             key = f.replace('.mat', '')
             sig = None
             for j in mat[key][0][0]:
@@ -184,12 +265,20 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
             while start + window_size <= len(scaled_sig):
                 extracted_windows.append(scaled_sig[start:start + window_size])
                 extracted_ids.append(bearing_id)
-                extracted_metas.append(setting_meta)
+                if meta_source == 'measured':
+                    meta = summarize_measured_meta(
+                        measured_signals, start, start + window_size, measured_meta_stats,
+                        vibration_sampling_rate=vibration_sampling_rate,
+                        op_sampling_rate=op_sampling_rate,
+                    )
+                else:
+                    meta = static_setting_meta
+                extracted_metas.append(meta)
                 setting_window_counts[setting_name] = setting_window_counts.get(setting_name, 0) + 1
                 start += stride_size
                 
         if not extracted_windows:
-            return np.empty((0, window_size)), np.array([], dtype=str), np.empty((0, 3), dtype=np.float32), setting_window_counts
+            return np.empty((0, window_size)), np.array([], dtype=str), np.empty((0, meta_input_dim), dtype=np.float32), setting_window_counts
         return np.array(extracted_windows), np.array(extracted_ids), np.array(extracted_metas, dtype=np.float32), setting_window_counts
 
     # 🚀 Step 4: 멀티 도메인 데이터셋 윈도우 가공 및 빌딩
@@ -201,6 +290,13 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     test_x = np.concatenate([test_norm_x, test_fault_x], axis=0)
     test_ids_per_window = np.concatenate([test_norm_ids_per_window, test_fault_ids_per_window], axis=0)
     test_meta = np.concatenate([test_norm_meta, test_fault_meta], axis=0)
+
+    if meta_source == 'measured':
+        train_meta_mean = train_meta.mean(axis=0)
+        train_meta_std = train_meta.std(axis=0)
+        train_meta = (train_meta - train_meta_mean) / (train_meta_std + 1e-8)
+        val_meta = (val_meta - train_meta_mean) / (train_meta_std + 1e-8) if len(val_meta) else val_meta
+        test_meta = (test_meta - train_meta_mean) / (train_meta_std + 1e-8) if len(test_meta) else test_meta
     
     # 이진 라벨 정의 (정상 0, 이상 1)
     train_y = np.zeros(len(train_x))
@@ -214,6 +310,9 @@ def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn",
     print(f'Test Settings: {test_loads}')
     print(f'Sensor Mode: {sensor_mode}')
     print(f'Sensor Names: {[sensor_mode]}')
+    print(f'Metadata Source: {meta_source}')
+    print(f'Measured Metadata Stats: {measured_meta_stats}')
+    print(f'Metadata Input Dim: {meta_input_dim}')
     print(f'n_sensor: {n_sensor}')
     if exclude_ids:
         print(f'Excluded Bearing IDs: {sorted(exclude_ids)}')

@@ -1,1 +1,21 @@
 *Data/
+
+# Python 캐시
+__pycache__/
+*.pyc
+
+# 학습 산출물 / 결과
+results/
+reports/
+docs/
+checkpoint/
+*.pth
+*.log
+
+# 대용량 데이터
+*.mat
+*.npy
+*.npz
+
+# Jupyter
+.ipynb_checkpoints/

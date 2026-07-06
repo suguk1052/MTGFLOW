@@ -169,8 +169,13 @@ cross-domain 실험에서 정보가 섞임(누수).
 - 브랜치 구조:
   - `main` = 원본 저자 레포. **절대 건드리지 않는다.**
   - `exp/pu` = 개인 연구 통합 브랜치. 모든 작업의 기준점.
-  - 작업은 **항상 `exp/pu`에서 새 브랜치를 따서** 하고, 접두어는 `claude/`.
-    예: `git -C MTGFLOW checkout -b claude/<작업요약> exp/pu`
+  - **코드(.py/.sh) 수정이 포함될 때만** `exp/pu`에서 새 브랜치를 따서 작업하고,
+    접두어는 `claude/`. 예: `git -C MTGFLOW checkout -b claude/<작업요약> exp/pu`
+  - **`.md` 문서만 수정하는 작업은 새 브랜치를 만들지 말고 현재 브랜치에서 바로** 한다.
+- 버전관리 대상:
+  - 학습 산출물·대용량 파일(`results/`, `reports/`, `docs/`, `checkpoint/`,
+    `*.pth`, `*.log`, `*.mat`, `__pycache__` 등)은 `.gitignore`로 **제외**한다.
+  - 코드(`.py`)·실행 스크립트(`.sh`)·문서(`.md`)는 **추적 유지**한다.
 - 승인 정책:
   - **커밋**은 의미 있는 단위로 자율적으로 해도 된다.
   - **`exp/pu`로의 merge, GitHub push, 브랜치 삭제**는 하지 말고 먼저 사용자에게 물어본다.

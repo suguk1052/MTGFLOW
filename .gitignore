@@ -12,6 +12,9 @@ checkpoint/
 *.pth
 *.log
 
+# Slurm 잡 로그
+runners/slurm_logs/
+
 # 대용량 데이터
 *.mat
 *.npy

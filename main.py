@@ -49,6 +49,8 @@ parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], 
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
 parser.add_argument('--exclude_ids', nargs='*', default=[], help='Paderborn bearing IDs to exclude from train, validation, and test splits.')
+parser.add_argument('--seeds', type=int, nargs='+', default=[2026],
+                    help='여러 시드 연달아 학습. run_name에 _s{seed} 자동 부착.')
 
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
@@ -125,8 +127,13 @@ def resolve_save_path(args):
     return os.path.join(args.output_dir, args.name)
 
 
-for seed in [2026]:
+base_run_name = args.run_name
+for seed in args.seeds:
     args.seed = seed
+    # 시드별로 run_name에 _s{seed}를 붙여 결과 폴더/checkpoint/metadata를 분기(덮어쓰기 방지).
+    # 매 반복마다 base에서 새로 붙여 다음 시드로 넘어갈 때 오염(_s7_s42)되지 않게 함.
+    if base_run_name is not None:
+        args.run_name = f"{base_run_name}_s{seed}"
     print(args)
     if args.name.lower() == 'paderborn':
         if not args.run_name:

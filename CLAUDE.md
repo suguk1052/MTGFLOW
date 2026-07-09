@@ -162,6 +162,38 @@ cross-domain 실험에서 정보가 섞임(누수).
   - Bash 출력의 `id: command not found` / `uname: command not found` (ohpc lmod init) 경고는 기존 프로필 특성이라 **무해하니 무시**.
 - (공통 원칙: 계획 먼저 승인, 임의 실행 금지, 브랜치 단위 작업 — `../CLAUDE.md` 참고)
 
+### Slurm GPU 실행 (연속 실험 맡기기)
+
+- **로그인 노드(piai-cluster)엔 GPU가 없다.** GPU 학습은 반드시 아래 래퍼로 잡을 제출한다.
+  Claude는 대화형 셸(`srun --pty` + `singularity shell`)을 유지 못 하므로,
+  `singularity exec --nv ... bash -lc '...'` 비대화형으로 접어 실행한다.
+- **노드는 허락된 것만.** 기본은 **n17 V100-16 1장** (`--partition=V100-16
+  --gres=gpu:V100-16:1 --nodelist=n17 --cpus-per-task=10`). 다른 노드는 사용자 허락 없이 쓰지 않는다.
+
+**재사용 래퍼:** `runners/slurm_run.sh`
+- 사용법(경로는 MTGFLOW 기준 상대, **여러 개 나열하면 순차 체인**):
+  ```bash
+  bash runners/slurm_run.sh <train1.sh> [<train2.sh> ...]
+  DRY_RUN=1 bash runners/slurm_run.sh ...   # 제출 없이 나갈 sbatch 명령만 출력(미리보기)
+  ```
+- 동작:
+  - 각 "학습 스크립트"에 대해 짝 test 스크립트를 파일명 규칙으로 자동 매칭
+    (`_5seeds.sh` → `_test_5seeds.sh`).
+  - 실험 하나 = **`학습(main.py) && test(test.py)` 한 잡** — 학습 성공해야 test 실행.
+  - 실험들 사이 = **`--dependency=afterok` 체인** — 앞 잡이 exit 0이어야 다음 시작,
+    중간 실패 시 뒤는 자동 취소.
+  - 잡 안에서 `conda activate mtgflow` 후 실행 → 실험 `.sh`의 bare `python3`가 mtgflow env로 해석.
+  - 로그: `runners/slurm_logs/<jobname>_<jobid>.out` (gitignore됨).
+
+**배치 묶음:** 실험 조합·순서는 배치별 submit 스크립트로 하드코딩(위 §7 선호 방식).
+예: `runners/LONO_B2_5seeds/submit_LONO_B2_5seeds_chain.sh` — 내부에서 `slurm_run.sh`에
+순서대로 학습 스크립트를 넘긴다. 새 배치는 이 파일을 복사해 목록만 바꾼다.
+
+**모니터링/중단:** `squeue -u dayoon` / `runners/slurm_logs/*.out` (Read) / `scancel <jobid>`.
+
+**주의:** 실험 `.sh`는 **포그라운드**여야 한다(끝에 `&` 금지). 백그라운드면 잡이 먼저 끝나
+학습이 죽는다. 실제 제출(GPU 사용)은 **사용자 승인 후** 실행한다(GPU 자원 정책).
+
 ### Git 워크플로우
 - git 저장소는 `MTGFLOW/`에 있고 Claude Code는 상위 `DCP/`에서 실행된다.
   매 명령마다 새 셸이 열려 `cd`가 유지되지 않으므로, **모든 git 명령은 `cd` 없이

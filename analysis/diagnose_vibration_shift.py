@@ -20,7 +20,6 @@
 
 import json
 import os
-import re
 import sys
 
 import numpy as np
@@ -30,6 +29,11 @@ from scipy.stats import kurtosis as scipy_kurtosis
 from scipy.stats import wasserstein_distance
 from sklearn.preprocessing import StandardScaler
 
+# analysis/ 아래로 옮겨졌으므로 MTGFLOW 루트(analysis/의 부모)를 sys.path에 넣어야 analysis._common을 찾는다.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+from analysis._common import extract_bearing_id
+
 ROOT = "/home/dayoon/DCP/Data/Paderborn"
 WINDOW_SIZE = 2048
 STRIDE_SIZE = 1024
@@ -38,14 +42,8 @@ NORMAL_IDS = ["K001", "K002", "K003", "K004", "K005", "K006"]
 SETTINGS = ["N15_M07_F10", "N09_M07_F10", "N15_M01_F10", "N15_M07_F04"]
 FEATURES = ["rms", "std", "absmax", "kurtosis", "wpd_node0_energy", "clearance_factor"]
 
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "Paderborn", "diag_measured_gate")
-
-BEARING_ID_RE = re.compile(r"(K[A-Z]?\d{2,3})(?:_|\.)")
-
-
-def extract_bearing_id(filename):
-    match = BEARING_ID_RE.search(filename)
-    return match.group(1) if match else filename.replace(".mat", "")
+# 스크립트 위치(analysis/)와 무관하게 항상 MTGFLOW/results/... 를 가리키게 PROJECT_ROOT 기준으로 구성
+OUT_DIR = os.path.join(PROJECT_ROOT, "results", "Paderborn", "diag_measured_gate")
 
 
 def load_vibration_1(mat_path):

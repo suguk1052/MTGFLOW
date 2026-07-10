@@ -11,19 +11,21 @@ import contextlib
 import io
 import json
 import os
-import re
 import sys
 
 import numpy as np
 import scipy.io
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# analysis/ 아래로 옮겨졌으므로 MTGFLOW 루트(analysis/의 부모)를 sys.path에 넣어야 Dataset를 찾는다.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
 from Dataset.paderborn import (
     extract_signal_from_mat,
     load_measured_operational_signals,
     loader_Paderborn_OCC,
     summarize_measured_meta,
 )
+from analysis._common import extract_bearing_id
 
 ROOT = "/home/dayoon/DCP/Data/Paderborn"
 WINDOW_SIZE = 2048
@@ -33,7 +35,8 @@ MEASURED_META_STATS = "meanstd"
 META_DIMS = ["speed_mean", "speed_std", "torque_mean", "torque_std", "force_mean", "force_std"]
 Z_THRESHOLD = 2.0
 
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "Paderborn", "diag_measured_gate")
+# 스크립트 위치(analysis/)와 무관하게 항상 MTGFLOW/results/... 를 가리키게 PROJECT_ROOT 기준으로 구성
+OUT_DIR = os.path.join(PROJECT_ROOT, "results", "Paderborn", "diag_measured_gate")
 
 LOSO_SPLITS = {
     "123to0": dict(train_loads=["N09_M07_F10", "N15_M01_F10", "N15_M07_F04"], test_loads=["N15_M07_F10"], held_out="N15_M07_F10"),
@@ -51,15 +54,6 @@ LONO_SPLITS = {
     5: dict(train_ids=["K001", "K002", "K003", "K004"], val_ids=["K006"], test_norm_ids=["K005"]),
     6: dict(train_ids=["K002", "K003", "K004", "K005"], val_ids=["K001"], test_norm_ids=["K006"]),
 }
-
-# Dataset/paderborn.py의 extract_bearing_id()와 동일한 규칙(재사용, 로더 내부라 직접 import 불가)
-BEARING_ID_RE = re.compile(r"(K[A-Z]?\d{2,3})(?:_|\.)")
-
-
-def extract_bearing_id(filename):
-    match = BEARING_ID_RE.search(filename)
-    return match.group(1) if match else filename.replace(".mat", "")
-
 
 def raw_train_meta(train_loads, train_ids):
     """train 파일들의 window-level measured meta를 정규화 전 상태로 직접 계산한다.

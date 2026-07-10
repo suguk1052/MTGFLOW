@@ -152,6 +152,9 @@ cross-domain 실험에서 정보가 섞임(누수).
 
 - 실험은 **별도 `.sh` 파일로 관리하고 RUN_NAME을 하드코딩하는 방식을 선호.**
   자동 run-name 생성/setting compacting utility는 불필요. train/test setting 구분만 명확하면 됨.
+- **분석/진단·보고서 작성용 스크립트는 `MTGFLOW/analysis/`에 모아서 관리한다.**
+  (예: `analysis/diagnose_measured_zscore.py`, `analysis/diagnose_vibration_shift.py`, 공통 유틸은 `analysis/_common.py`)
+  학습/평가 코드(`main.py`, `test.py`, `Dataset/`)와 분석 코드를 분리해 관리하기 위함. 앞으로 새 분석/리포트용 스크립트가 필요하면 이 폴더를 활용할 것.
 - 만든 코드는 사용자가 논문 의도·실험 설계와 맞는지 직접 검토·병합 (무조건 병합 아님).
 - 경로·파일명 규칙 하드코딩 금지 (root path + setting을 받아 구성).
 - train/val/test bearing ID 겹침 여부에 assert 또는 warning 권장.

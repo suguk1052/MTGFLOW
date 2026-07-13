@@ -2,6 +2,7 @@
 import os
 os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
 import argparse
+import json
 import time
 import torch
 from models.MTGFLOW import MTGFLOW
@@ -57,6 +58,9 @@ parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
 parser.add_argument('--window_size', type=int, default=60)
 parser.add_argument('--lr', type=float, default=2e-3, help='Learning rate.')
+parser.add_argument('--log_test_auroc', action='store_true',
+                    help='(관찰용, 결과에 영향 없음) Paderborn 학습 중 매 epoch test AUROC를 계산해 '
+                         'train_log.jsonl에 기록. checkpoint 선택 기준(val loss)에는 사용하지 않음.')
 
 
 
@@ -213,13 +217,19 @@ for seed in args.seeds:
 
     loss_best = np.inf
     roc_max = 0
-  
-    lr = args.lr 
+
+    lr = args.lr
     optimizer = torch.optim.Adam([
         {'params': model.parameters(), 'weight_decay': args.weight_decay},
         ], lr=lr, weight_decay=0.0)
 
     train_start_time = time.perf_counter()
+
+    # 관찰용 학습 로그(Paderborn 전용): 매 epoch train/val loss(+옵션 test AUROC)를
+    # 구조화된 jsonl로 저장. checkpoint 선택/학습 결과에는 영향 없음(순수 기록용).
+    train_log_path = os.path.join(save_path, 'train_log.jsonl') if args.name.lower() == 'paderborn' else None
+    if train_log_path and os.path.exists(train_log_path):
+        os.remove(train_log_path)
 
     for epoch in range(40):
         epoch_start_time = time.perf_counter()
@@ -254,6 +264,22 @@ for seed in args.seeds:
             loss_val = np.concatenate(loss_val)
             mean_val_loss = np.mean(loss_val)
 
+            # 관찰용 test AUROC(옵션): val split은 정상 데이터만 있어 AUROC 계산이 불가능하므로
+            # 대신 test set으로 매 epoch AUROC를 계산해 기록한다. checkpoint 선택(위 loss_best
+            # 기준)에는 전혀 관여하지 않는 순수 모니터링 값이다.
+            test_auroc_log = None
+            if args.log_test_auroc:
+                loss_test_log = []
+                with torch.no_grad():
+                    for batch in test_loader:
+                        x = batch[0].to(device)
+                        meta = batch[3].to(device) if args.use_meta and len(batch) > 3 else None
+                        loss = -model.test(x, meta).cpu().numpy()
+                        loss_test_log.append(loss)
+                loss_test_log = np.concatenate(loss_test_log)
+                test_labels_log = np.asarray(test_loader.dataset.label, dtype=int)
+                test_auroc_log = float(roc_auc_score(test_labels_log, loss_test_log))
+
             if loss_best > mean_val_loss:
                 loss_best = mean_val_loss
                 torch.save({
@@ -263,8 +289,20 @@ for seed in args.seeds:
                     'paderborn_metadata': build_paderborn_metadata(args),
                 }, os.path.join(save_path, 'model.pth'))
 
+            if train_log_path:
+                with open(train_log_path, 'a', encoding='utf-8') as logf:
+                    logf.write(json.dumps({
+                        'epoch': epoch,
+                        'seed': seed,
+                        'train_loss_mean': float(np.mean(loss_train)),
+                        'val_loss_mean': float(mean_val_loss),
+                        'val_loss_best': float(loss_best),
+                        'test_auroc_log_only': test_auroc_log,
+                    }) + '\n')
+
             epoch_wall_clock_sec = time.perf_counter() - epoch_start_time
-            log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Val Loss: {mean_val_loss:.4f} | Best Val Loss: {loss_best:.4f} | Epoch Wall-Clock: {epoch_wall_clock_sec:.2f}s"
+            auroc_log_str = f" | Test AUROC(log-only): {test_auroc_log:.4f}" if test_auroc_log is not None else ""
+            log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Val Loss: {mean_val_loss:.4f} | Best Val Loss: {loss_best:.4f}{auroc_log_str} | Epoch Wall-Clock: {epoch_wall_clock_sec:.2f}s"
             print(log_string)
         else:
             loss_test = []

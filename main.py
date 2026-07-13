@@ -1,5 +1,6 @@
 # %%
 import os
+os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
 import argparse
 import time
 import torch
@@ -150,6 +151,9 @@ for seed in args.seeds:
     torch.manual_seed(args.seed)
     if args.cuda:
         torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     # %%
     print("Loading dataset")
     print(args.name)

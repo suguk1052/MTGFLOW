@@ -33,6 +33,27 @@ TODO.md §0(학습 안정성 확보)에서 C2(LOSO) 5-seed 재검증 시 measure
 
 > ⚠️ 커버리지 비대칭: `meta×pooled` 칸은 measured만(static pooled 대조군은 안 돌림) n=3으로 표본이 작다. `no-meta×LOSO`는 4개 split 중 123to0/012to3 두 개만 확인했다(023to1/013to2 no-meta 대조군은 없음). 결론의 방향성은 아래 상세표(특히 no-meta가 확인된 두 split이 "심한 split"과 "덜 심한 split" 하나씩이라는 점)로 보강되지만, 완전한 4×2 대조는 아니다.
 
+**위 표는 "전체 증거(일반성)" 표다** — meta×LOSO 칸(n=78)은 4개 split × static/measured × LONO(1,4,6) × 3seed를 전부 모은 것이라 표본이 크지만, 대조군(no-meta) 칸들과 좌표가 다르다(대조군은 LONO4 하나, split도 2개뿐). 아래는 이 비대칭을 없앤 **엄격 paired 대조 표**다 — 새 학습 없이 기존 로그에서 대조군과 정확히 같은 좌표(LONO4, seed 2024/2025/2026)만 뽑아 4칸을 다시 집계했다.
+
+## 엄격 paired 대조 표 (동일 좌표: LONO4, seed 2024/2025/2026만)
+
+| | **pooled** | **LOSO (unseen)** |
+|---|---|---|
+| **no-meta** | n=3 (B2, LONO4), corr=-0.507, gap=0.084 (max 0.119), gap>0.3: 0/3 | n=6 (123to0+012to3, LONO4), corr=-0.625, gap=0.024 (max 0.067), gap>0.3: 0/6 |
+| **meta** | n=3 (C1_measured, LONO4), corr=-0.711, gap=0.212 (max 0.267), gap>0.3: 0/3 | n=9 (123to0 static + 012to3 static/measured, LONO4), corr=-0.349, gap=0.210 (max 0.986), gap>0.3: 2/9 |
+
+paired 표의 meta×LOSO 9개 run 내역(참고용, split·조건별):
+
+| split · 조건 | seed 2024 gap | seed 2025 gap | seed 2026 gap |
+|---|---|---|---|
+| 123to0 static | 0.687 | 0.109 | 0.000 |
+| 012to3 static | 0.001 | 0.000 | 0.000 |
+| 012to3 measured | 0.986 | 0.073 | 0.033 |
+
+> ⚠️ **완전 대칭은 아니다.** no-meta×LOSO가 LONO4·2개 split만 있어서 meta×LOSO도 같은 2개 split·LONO4로 맞췄다(023to1/013to2 제외 — 이 두 split이 전체 증거 표에서 gap이 가장 컸던 split이라, 제외하면 meta×LOSO의 심각도가 다소 낮아진다). meta×pooled는 measured만 있어(static pooled 대조군 없음) 그대로 두었다.
+
+**두 표를 같이 읽으면**: 방향은 일치한다 — 두 표 모두 no-meta 칸(pooled·LOSO 불문)은 gap≈0.02~0.08로 깨끗하고, meta가 들어간 칸은 그보다 gap이 크다. 다만 **정도는 다르다**: 전체 증거 표에서는 meta×LOSO(0.359)가 meta×pooled(0.212)보다 뚜렷이 나쁘지만, paired 표에서는 meta×LOSO(0.210)와 meta×pooled(0.212)가 **거의 같다** — LONO4·123to0/012to3만 보면 "LOSO라서 유독 나쁘다"는 신호가 약해진다. 즉 **"meta+unseen 조합이 no-meta보다 나쁘다"는 확정적**이지만, **"그중에서도 LOSO가 pooled보다 특별히 더 나쁘다"는 023to1/013to2를 포함한 전체 증거에 의존하며, LONO4 두 split만으로는 재현되지 않는다.** 이 split-수준 이질성(023to1/013to2가 특히 심함)은 이미 알려진 023to1 threshold collapse 이슈와 겹칠 수 있어(§한계 참고), 추가 확인 없이는 "LOSO 일반"과 "023to1/013to2 특유"를 완전히 분리하기 어렵다.
+
 ---
 
 ## 상세 표 (11개 조건, 19+24=43개 run 집계)
@@ -63,6 +84,7 @@ TODO.md §0(학습 안정성 확보)에서 C2(LOSO) 5-seed 재검증 시 measure
 - **pooled는 meta(measured)가 있어도 안전하다**: corr -0.71, gap 0.21(0.3 문턱 밑), gap>0.3 0건.
 - **LOSO + meta는 static이든 measured든, 4개 split 전부에서 깨진다**: corr이 대체로 -0.2~+0.11로 no-meta 대비 뚜렷이 약하고, gap은 평균 0.21~0.50, 최대 0.85~0.99까지 나오며 44/78 run이 gap>0.3이다. 123to0만의 현상이 아니라 **023to1/013to2/012to3에서도 동일한 패턴**이 재현됐다(오히려 023to1/013to2는 measured 조건에서 123to0보다 더 심함).
 - 이 네 가지 대조가 교차하므로, 문제는 "학습이 발산한다"거나 "meta가 나쁘다"가 아니라 **"unseen(LOSO) 조건을 meta로 조건화했을 때, val loss(정상 밀도 적합)와 test AUROC(판별력)가 서로 정보를 안 주는 상황이 되고, 그 상태에서 val loss로 checkpoint를 고르면 무작위에 가까운 성능이 선택된다"**는 프로토콜 수준 문제로 확정한다.
+- **단, "LOSO가 pooled보다 특별히 더 나쁘다"는 정도 차이는 023to1/013to2가 포함된 전체 증거에 의존한다.** 대조군과 완전히 동일한 좌표(LONO4, 123to0/012to3만)로 좁힌 "엄격 paired 대조 표"(아래)에서는 meta×LOSO(gap 0.210)와 meta×pooled(gap 0.212)가 거의 같아진다 — 즉 "meta+unseen이 no-meta보다 나쁘다"는 이 좁은 좌표에서도 재확인되지만, "그중 LOSO가 pooled보다 더 나쁘다"는 023to1/013to2를 포함해야 뚜렷하다.
 
 ### [유력한 해석, 메커니즘 미확정] density 적합 목적과 판별 목적의 불일치
 

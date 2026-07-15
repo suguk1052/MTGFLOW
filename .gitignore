@@ -6,7 +6,6 @@ __pycache__/
 
 # 학습 산출물 / 결과
 results/
-reports/
 docs/
 checkpoint/
 *.pth

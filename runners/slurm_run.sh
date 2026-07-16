@@ -1,11 +1,11 @@
 #!/bin/bash
 # ==============================================================================
-# Slurm 제출 래퍼 (n17 V100-16 1장 고정)
+# Slurm 제출 래퍼 (V100-16 1장; 노드 기본 n17, NODELIST 환경변수로 n16 등 오버라이드)
 #  - 인자로 받은 각 "학습 스크립트"에 대해 (학습 && test)를 한 잡으로 제출
 #  - test 스크립트는 파일명 규칙으로 자동 매칭: _5seeds.sh -> _test_5seeds.sh
 #  - 여러 개면 --dependency=afterok 로 순차 체인 (앞이 성공해야 다음 시작)
 #  - 비대화형: singularity exec --nv ... bash -lc '... conda activate mtgflow ...'
-#  - n17 외 노드 절대 사용 금지
+#  - 허락된 노드만 사용(기본 n17, NODELIST로 n16 지정 가능)
 #
 # 사용법:
 #   bash runners/slurm_run.sh <train1.sh> [<train2.sh> ...]   # (경로는 MTGFLOW 기준 상대)
@@ -13,13 +13,17 @@
 # ==============================================================================
 set -euo pipefail
 
-ROOT="/home/dayoon/DCP/MTGFLOW"
-SIF="/home/dayoon/containers/anomaly-base_cu118-u20.sif"
-CONDA_SH="/home/dayoon/miniconda3/etc/profile.d/conda.sh"
+# 경로는 실행 사용자 HOME 기준(제출 시 로그인 노드에서 확장). 과거 /home/dayoon 하드코딩은
+# 계정 이관 후 stale였음 → $HOME 기반으로 교체(현재 dyhwang, 공유 홈이면 이관에도 견고).
+ROOT="$HOME/DCP/MTGFLOW"
+SIF="$HOME/containers/anomaly-base_cu118-u20.sif"
+CONDA_SH="$HOME/miniconda3/etc/profile.d/conda.sh"
 LOGDIR="$ROOT/runners/slurm_logs"
 
-# n17 V100 1장 고정 (다른 노드 절대 금지)
-SLURM_RES=(--partition=V100-16 --gres=gpu:V100-16:1 --nodelist=n17 --cpus-per-task=10)
+# V100-16 1장. 노드는 기본 n17, NODELIST 환경변수로 오버라이드(허락된 n16/n17만).
+#   예: NODELIST=n16 bash runners/slurm_run.sh ...
+NODELIST="${NODELIST:-n17}"
+SLURM_RES=(--partition=V100-16 --gres=gpu:V100-16:1 --nodelist="$NODELIST" --cpus-per-task=10)
 
 mkdir -p "$LOGDIR"
 

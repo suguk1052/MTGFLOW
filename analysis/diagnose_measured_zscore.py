@@ -27,7 +27,7 @@ from Dataset.paderborn import (
 )
 from analysis._common import extract_bearing_id
 
-ROOT = "/home/dayoon/DCP/Data/Paderborn"
+ROOT = os.path.normpath(os.path.join(PROJECT_ROOT, '..', 'Data', 'Paderborn'))
 WINDOW_SIZE = 2048
 STRIDE_SIZE = 1024
 SENSOR_MODE = "vibration_1"

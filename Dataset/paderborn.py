@@ -11,6 +11,12 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
+# Paderborn 데이터 기본 위치: 이 파일(MTGFLOW/Dataset/)의 두 단계 상위가 MTGFLOW,
+# 그 옆(../)의 Data/Paderborn. 실행 위치(cwd)와 무관하게 항상 올바른 경로를 가리킨다.
+_DATA_ROOT = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    '..', 'Data', 'Paderborn'))
+
 PADERBORN_SETTING_META = {
     "N15_M07_F10": [1500.0, 0.7, 1000.0],
     "N09_M07_F10": [900.0, 0.7, 1000.0],
@@ -122,7 +128,7 @@ class Paderborn_dataset(Dataset):
         return torch.FloatTensor(window_data).transpose(0, 1), self.label[index], index, torch.FloatTensor(self.metas[index])
 
 
-def loader_Paderborn_OCC(root="/home/dayoon/DCP/Data/Paderborn", 
+def loader_Paderborn_OCC(root=_DATA_ROOT,
                          loads=["N15_M07_F10"],
                          train_loads=None,
                          test_loads=None,
@@ -347,7 +353,7 @@ if __name__ == '__main__':
     # 로컬 가동 및 차원 디버깅 테스트용 플래그
     # 세팅 0(N15_M07_F10)과 세팅 2(N15_M01_F10) 데이터를 동시에 묶어서 로드하는 예시
     train_l, val_l, test_l, ns = loader_Paderborn_OCC(
-        file_path='/home/dayoon/DCP/Data/Paderborn',
+        file_path=_DATA_ROOT,
         loads=['N15_M07_F10', 'N15_M01_F10'], # 🚀 두 개 폴더 동시 지정 테스트
         window_size=2048,
         stride_size=1024

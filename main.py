@@ -7,7 +7,12 @@ import time
 import torch
 from models.MTGFLOW import MTGFLOW
 import numpy as np
-from sklearn.metrics import roc_auc_score, precision_recall_curve 
+from sklearn.metrics import roc_auc_score, precision_recall_curve
+
+# Paderborn 데이터 기본 위치: 이 파일(MTGFLOW/)의 상위(../)에 있는 Data/Paderborn.
+# 실행 위치(cwd)와 무관하게 항상 올바른 경로를 가리킨다.
+_DATA_ROOT = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', 'Data', 'Paderborn'))
 
 parser = argparse.ArgumentParser()
 
@@ -185,7 +190,7 @@ for seed in args.seeds:
     # 🚀 [수정 포인트 3] 쉘 스크립트에서 --name=paderborn 을 줬을 때 작동할 분기 연결
     elif args.name.lower() == 'paderborn':
         train_loader, val_loader, test_loader, n_sensor = loader_Paderborn_OCC(
-            root="/home/dayoon/DCP/Data/Paderborn",
+            root=_DATA_ROOT,
             loads=args.load_setting,               # 스크립트에서 넘겨받은 하중 조건 세팅 주입
             train_loads=args.train_load_setting,
             test_loads=args.test_load_setting,

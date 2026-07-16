@@ -38,7 +38,7 @@ def load_checkpoint(run_name):
 
 def build_model_and_loaders(metadata):
     train_loader, val_loader, test_loader, n_sensor = loader_Paderborn_OCC(
-        root="/home/dayoon/DCP/Data/Paderborn",
+        root=os.path.join(PROJECT_ROOT, '..', 'Data', 'Paderborn'),
         loads=metadata['load_setting'],
         train_loads=metadata.get('train_load_setting'),
         test_loads=metadata.get('test_load_setting'),

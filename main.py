@@ -65,6 +65,7 @@ parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--weight_decay', type=float, default=5e-4)
 parser.add_argument('--window_size', type=int, default=60)
 parser.add_argument('--lr', type=float, default=2e-3, help='Learning rate.')
+parser.add_argument('--epochs', type=int, default=40, help='학습 epoch 수(기본 40). 스모크 등 짧은 실행에 사용.')
 parser.add_argument('--log_test_auroc', action='store_true',
                     help='(관찰용, 결과에 영향 없음) Paderborn 학습 중 매 epoch test AUROC를 계산해 '
                          'train_log.jsonl에 기록. checkpoint 선택 기준(val loss)에는 사용하지 않음.')
@@ -239,7 +240,7 @@ for seed in args.seeds:
     if train_log_path and os.path.exists(train_log_path):
         os.remove(train_log_path)
 
-    for epoch in range(40):
+    for epoch in range(args.epochs):
         epoch_start_time = time.perf_counter()
         loss_train = []
 
@@ -310,7 +311,7 @@ for seed in args.seeds:
 
             epoch_wall_clock_sec = time.perf_counter() - epoch_start_time
             auroc_log_str = f" | Test AUROC(log-only): {test_auroc_log:.4f}" if test_auroc_log is not None else ""
-            log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Val Loss: {mean_val_loss:.4f} | Best Val Loss: {loss_best:.4f}{auroc_log_str} | Epoch Wall-Clock: {epoch_wall_clock_sec:.2f}s"
+            log_string = f"[Seed {seed}] Epoch {epoch:02d}/{args.epochs} -> Mean Train Loss: {np.mean(loss_train):.4f} | Val Loss: {mean_val_loss:.4f} | Best Val Loss: {loss_best:.4f}{auroc_log_str} | Epoch Wall-Clock: {epoch_wall_clock_sec:.2f}s"
             print(log_string)
         else:
             loss_test = []
@@ -338,7 +339,7 @@ for seed in args.seeds:
 
             # 터미널 출력 포맷 수정
             epoch_wall_clock_sec = time.perf_counter() - epoch_start_time
-            log_string = f"[Seed {seed}] Epoch {epoch:02d}/40 -> Mean Train Loss: {np.mean(loss_train):.4f} | Test AUROC: {roc_test:.4f} | Best AUROC: {roc_max:.4f} | Epoch Wall-Clock: {epoch_wall_clock_sec:.2f}s"
+            log_string = f"[Seed {seed}] Epoch {epoch:02d}/{args.epochs} -> Mean Train Loss: {np.mean(loss_train):.4f} | Test AUROC: {roc_test:.4f} | Best AUROC: {roc_max:.4f} | Epoch Wall-Clock: {epoch_wall_clock_sec:.2f}s"
             print(log_string)
 
     train_wall_clock_sec = time.perf_counter() - train_start_time

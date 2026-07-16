@@ -128,26 +128,44 @@ class ScaleDotProductAttention(nn.Module):
 
 class MTGFLOW(nn.Module):
 
-    def __init__ (self, n_blocks, input_size, hidden_size, n_hidden, window_size, n_sensor, dropout = 0.1, model="MAF", batch_norm=True, use_meta=False, meta_input_dim=3, meta_emb_dim=8):
+    def __init__ (self, n_blocks, input_size, hidden_size, n_hidden, window_size, n_sensor, dropout = 0.1, model="MAF", batch_norm=True, use_meta=False, meta_input_dim=3, meta_emb_dim=8, meta_inject='concat'):
         super(MTGFLOW, self).__init__()
 
         self.rnn = nn.LSTM(input_size=input_size,hidden_size=hidden_size,batch_first=True, dropout=dropout)
         self.gcn = GNN(input_size=hidden_size, hidden_size=hidden_size)
         self.use_meta = use_meta
         self.meta_emb_dim = meta_emb_dim
+        # meta 주입 방식: 'concat'(기존, condition C에 C_op를 이어붙임) 또는
+        #               'film'(C_op로 C를 곱·덧셈 변조; MAF 입력 차원은 no-meta와 동일).
+        self.meta_inject = meta_inject if use_meta else 'concat'
         if self.use_meta:
             self.meta_encoder = nn.Sequential(
                 nn.Linear(meta_input_dim, 16),
                 nn.ReLU(),
                 nn.Linear(16, meta_emb_dim),
             )
+            # FiLM(A안): C_op(meta_emb)에서 작은 MLP로 Δγ, β (각 hidden_size 차원)를 만들어 C를 변조.
+            # ★ 항등 초기화: 최종 Linear weight/bias를 0으로 두어 시작 시 Δγ=β=0 → C_mod=C (do-no-harm).
+            if self.meta_inject == 'film':
+                film_out = nn.Linear(16, 2 * hidden_size)
+                nn.init.zeros_(film_out.weight)
+                nn.init.zeros_(film_out.bias)
+                self.film = nn.Sequential(
+                    nn.Linear(meta_emb_dim, 16),
+                    nn.ReLU(),
+                    film_out,
+                )
+            else:
+                self.film = None
         else:
             self.meta_encoder = None
-        cond_dim = hidden_size + meta_emb_dim if self.use_meta else hidden_size
+            self.film = None
+        # film 모드는 C를 변조만 하므로 MAF 입력(condition) 차원은 no-meta와 동일(hidden_size).
+        cond_dim = hidden_size + meta_emb_dim if (self.use_meta and self.meta_inject == 'concat') else hidden_size
         if model=="MAF":
             # self.nf = MAF(n_blocks, n_sensor, input_size, hidden_size, n_hidden, cond_label_size=hidden_size, batch_norm=batch_norm,activation='tanh', mode = 'zero')
             self.nf = MAF(n_blocks, n_sensor, input_size, hidden_size, n_hidden, cond_label_size=cond_dim, batch_norm=batch_norm,activation='tanh')
-      
+
         self.attention = ScaleDotProductAttention(window_size*input_size)
     def forward(self, x, meta=None):
 
@@ -160,6 +178,15 @@ class MTGFLOW(nn.Module):
             raise ValueError("MTGFLOW was created with use_meta=True, but no metadata tensor was provided.")
         meta = meta.to(device=h.device, dtype=h.dtype)
         meta_emb = self.meta_encoder(meta)
+        if self.meta_inject == 'film':
+            # C_op에서 Δγ, β 산출 → C_mod = (1+Δγ)⊙C + β. window(N축) 단위로 만들어 K·L·H 격자로 broadcast.
+            film = self.film(meta_emb)                        # [N, 2H]
+            gamma, beta = film.chunk(2, dim=-1)               # 각 [N, H]
+            hdim = h.shape[3]
+            gamma = gamma.view(full_shape[0], 1, 1, hdim).expand(full_shape[0], full_shape[1], full_shape[2], hdim)
+            beta = beta.view(full_shape[0], 1, 1, hdim).expand(full_shape[0], full_shape[1], full_shape[2], hdim)
+            h_mod = (1.0 + gamma) * h + beta
+            return h_mod.reshape((-1, hdim))
         meta_emb = meta_emb.view(full_shape[0], 1, 1, self.meta_emb_dim)
         meta_emb = meta_emb.expand(full_shape[0], full_shape[1], full_shape[2], self.meta_emb_dim)
         h_flat = h.reshape((-1, h.shape[3]))

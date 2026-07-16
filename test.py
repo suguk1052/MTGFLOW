@@ -39,6 +39,8 @@ parser.add_argument('--meta_source', type=str, default='static', choices=['stati
                     help='Metadata source for Paderborn: static setting metadata or measured operational signals.')
 parser.add_argument('--measured_meta_stats', type=str, default='meanstd', choices=['mean', 'meanstd'],
                     help='Window-level statistics for measured operational metadata.')
+parser.add_argument('--meta_inject', type=str, default='concat', choices=['concat', 'film'],
+                    help="Meta 주입 방식: 'concat'(기존) 또는 'film'(C_op로 C를 변조). checkpoint 값으로 복원.")
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
 parser.add_argument('--sampling_rate', type=float, default=1.0,
@@ -125,6 +127,7 @@ def build_paderborn_metadata(args):
         'measured_meta_stats': args.measured_meta_stats,
         'meta_input_dim': int(resolve_meta_input_dim(args)),
         'meta_emb_dim': int(args.meta_emb_dim),
+        'meta_inject': args.meta_inject,
     }
 
 
@@ -159,6 +162,9 @@ def reconcile_paderborn_args_with_checkpoint(args, checkpoint):
         args.measured_meta_stats = metadata.get('measured_meta_stats', args.measured_meta_stats)
     if not option_was_provided('--meta_emb_dim'):
         args.meta_emb_dim = int(metadata.get('meta_emb_dim', args.meta_emb_dim))
+    if not option_was_provided('--meta_inject'):
+        # 구 checkpoint(meta_inject 키 없음)는 기존 concat으로 복원.
+        args.meta_inject = metadata.get('meta_inject', args.meta_inject)
     return configure_paderborn_args(args)
 
 def resolve_checkpoint_path(args):
@@ -201,6 +207,7 @@ def compute_realtime_stats(num_windows, model_only_sec, end_to_end_sec, args):
         'measured_meta_stats': args.measured_meta_stats,
         'meta_input_dim': int(resolve_meta_input_dim(args)),
         'meta_emb_dim': int(args.meta_emb_dim),
+        'meta_inject': args.meta_inject,
         'stride_size': int(args.stride_size),
         'required_wps_for_realtime': required_wps_for_realtime,
         'total_windows': int(num_windows),
@@ -298,7 +305,7 @@ def warn_if_metadata_mismatch(checkpoint, reference_metadata):
         return
     for key in ('load_setting', 'train_load_setting', 'test_load_setting', 'sensor_mode',
                 'train_ids', 'val_ids', 'test_norm_ids', 'window_size', 'stride_size',
-                'use_meta', 'meta_source', 'measured_meta_stats', 'meta_input_dim', 'meta_emb_dim'):
+                'use_meta', 'meta_source', 'measured_meta_stats', 'meta_input_dim', 'meta_emb_dim', 'meta_inject'):
         if metadata.get(key) != reference_metadata.get(key):
             print(f"⚠️ Warning: seed checkpoint {key}={metadata.get(key)} differs from "
                   f"reference {key}={reference_metadata.get(key)}. 결과가 시드 간 비교 불가능할 수 있음.")
@@ -381,6 +388,7 @@ def evaluate_run(run_name, model, test_loader, val_loader, paderborn_mode, refer
                 'measured_meta_stats': args.measured_meta_stats,
                 'meta_input_dim': int(resolve_meta_input_dim(args)),
                 'meta_emb_dim': int(args.meta_emb_dim),
+                'meta_inject': args.meta_inject,
                 'train_ids': list(args.train_ids),
                 'val_ids': list(args.val_ids),
                 'test_norm_ids': list(args.test_norm_ids),
@@ -398,6 +406,7 @@ def evaluate_run(run_name, model, test_loader, val_loader, paderborn_mode, refer
                 'measured_meta_stats': args.measured_meta_stats,
                 'meta_input_dim': int(resolve_meta_input_dim(args)),
                 'meta_emb_dim': int(args.meta_emb_dim),
+                'meta_inject': args.meta_inject,
             },
             'threshold': threshold,
             'threshold_percentile': float(args.threshold_percentile),
@@ -425,6 +434,7 @@ def evaluate_run(run_name, model, test_loader, val_loader, paderborn_mode, refer
                 'measured_meta_stats': args.measured_meta_stats,
                 'meta_input_dim': int(resolve_meta_input_dim(args)),
                 'meta_emb_dim': int(args.meta_emb_dim),
+                'meta_inject': args.meta_inject,
                 'train_split': float(args.train_split),
             },
         })
@@ -465,7 +475,7 @@ if args.name.lower() == 'paderborn':
 
 train_loader, val_loader, test_loader, n_sensor = build_loaders(args)
 
-model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim)
+model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject)
 model = model.to(device)
 
 per_seed = []

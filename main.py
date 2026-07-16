@@ -40,6 +40,8 @@ parser.add_argument('--meta_source', type=str, default='static', choices=['stati
                     help='Metadata source for Paderborn: static setting metadata or measured operational signals.')
 parser.add_argument('--measured_meta_stats', type=str, default='meanstd', choices=['mean', 'meanstd'],
                     help='Window-level statistics for measured operational metadata.')
+parser.add_argument('--meta_inject', type=str, default='concat', choices=['concat', 'film'],
+                    help="Meta 주입 방식: 'concat'(기존, condition C에 C_op를 이어붙임) 또는 'film'(C_op로 C를 곱·덧셈 변조; 항등 초기화).")
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
 parser.add_argument('--sampling_rate', type=float, default=1.0,
@@ -127,6 +129,7 @@ def build_paderborn_metadata(args):
         'measured_meta_stats': args.measured_meta_stats,
         'meta_input_dim': int(resolve_meta_input_dim(args)),
         'meta_emb_dim': int(args.meta_emb_dim),
+        'meta_inject': args.meta_inject,
     }
 
 def resolve_save_path(args):
@@ -207,7 +210,7 @@ for seed in args.seeds:
         )
 
     # %%
-    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim)
+    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject)
     model = model.to(device)
 
     # %%

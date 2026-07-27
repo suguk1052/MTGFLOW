@@ -10,11 +10,11 @@
 #  기존 runners/slurm_run.sh를 그대로 재사용(n17 고정, --dependency=afterok 체인).
 #  다른 노드는 전혀 건드리지 않음.
 #
-#  실제 제출: bash runners/LOSO_static_measured_lossobs/submit_3chains_n17.sh
-#  미리보기:  DRY_RUN=1 bash runners/LOSO_static_measured_lossobs/submit_3chains_n17.sh
+#  실제 제출: bash runners/Paderborn/LOSO_static_measured_lossobs/submit_3chains_n17.sh
+#  미리보기:  DRY_RUN=1 bash runners/Paderborn/LOSO_static_measured_lossobs/submit_3chains_n17.sh
 # ==============================================================================
 set -euo pipefail
-DIR="runners/LOSO_static_measured_lossobs"
+DIR="runners/Paderborn/LOSO_static_measured_lossobs"
 
 echo "=== Chain 1: 023to1 (static+measured x LONO1,4,6) ==="
 bash runners/slurm_run.sh \

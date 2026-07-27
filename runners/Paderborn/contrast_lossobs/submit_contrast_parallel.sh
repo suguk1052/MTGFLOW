@@ -11,8 +11,8 @@
 # 안에서 스케줄러가 유휴 노드(제출 시점 n13/n14/n17)에 자동 배정하게 한다.
 # slurm_run.sh 자체는 건드리지 않음 - 이후 실험은 기존처럼 n17 고정 사용.
 #
-# 실제 제출: bash runners/contrast_lossobs/submit_contrast_parallel.sh
-# 미리보기:  DRY_RUN=1 bash runners/contrast_lossobs/submit_contrast_parallel.sh
+# 실제 제출: bash runners/Paderborn/contrast_lossobs/submit_contrast_parallel.sh
+# 미리보기:  DRY_RUN=1 bash runners/Paderborn/contrast_lossobs/submit_contrast_parallel.sh
 # ==============================================================================
 set -euo pipefail
 
@@ -20,7 +20,7 @@ ROOT="/home/dayoon/DCP/MTGFLOW"
 SIF="/home/dayoon/containers/anomaly-base_cu118-u20.sif"
 CONDA_SH="/home/dayoon/miniconda3/etc/profile.d/conda.sh"
 LOGDIR="$ROOT/runners/slurm_logs"
-DIR="runners/contrast_lossobs"
+DIR="runners/Paderborn/contrast_lossobs"
 
 # n17 고정 없이 V100-16 파티션 내 유휴 노드에 스케줄러가 자동 배정하도록 함
 SLURM_RES=(--partition=V100-16 --gres=gpu:V100-16:1 --cpus-per-task=10)

@@ -5,11 +5,11 @@
 #  train_log.jsonl(+ --log_test_auroc)로 epoch별 train/val loss, test AUROC를
 #  기록한다. 모델/정규화는 기존 LONO_C2_5seeds와 동일 - 결과 재현 확인 + 실패
 #  시드의 loss curve 확보가 목적. RUN_NAME에 _lossobs를 붙여 기존 결과와 분리.
-#  실제 제출: bash runners/LONO_C2_123to0_lossobs/submit_C2_123to0_lossobs_chain.sh
-#  미리보기:  DRY_RUN=1 bash runners/LONO_C2_123to0_lossobs/submit_C2_123to0_lossobs_chain.sh
+#  실제 제출: bash runners/Paderborn/LONO_C2_123to0_lossobs/submit_C2_123to0_lossobs_chain.sh
+#  미리보기:  DRY_RUN=1 bash runners/Paderborn/LONO_C2_123to0_lossobs/submit_C2_123to0_lossobs_chain.sh
 # ==============================================================================
 set -euo pipefail
-DIR="runners/LONO_C2_123to0_lossobs"
+DIR="runners/Paderborn/LONO_C2_123to0_lossobs"
 
 bash runners/slurm_run.sh \
   "$DIR/run_Paderborn_CA_123to0_LONO1_lossobs_5seeds.sh" \

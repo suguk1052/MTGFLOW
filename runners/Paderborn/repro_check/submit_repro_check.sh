@@ -5,8 +5,8 @@
 # (run_repro_check.sh)를 그대로 실행한다.
 #
 # 사용법:
-#   bash runners/repro_check/submit_repro_check.sh
-#   DRY_RUN=1 bash runners/repro_check/submit_repro_check.sh   # 미리보기만
+#   bash runners/Paderborn/repro_check/submit_repro_check.sh
+#   DRY_RUN=1 bash runners/Paderborn/repro_check/submit_repro_check.sh   # 미리보기만
 # ==============================================================================
 set -euo pipefail
 
@@ -19,7 +19,7 @@ SLURM_RES=(--partition=V100-16 --gres=gpu:V100-16:1 --nodelist=n17 --cpus-per-ta
 
 mkdir -p "$LOGDIR"
 
-inner="source $CONDA_SH && conda activate mtgflow && cd $ROOT && bash runners/repro_check/run_repro_check.sh"
+inner="source $CONDA_SH && conda activate mtgflow && cd $ROOT && bash runners/Paderborn/repro_check/run_repro_check.sh"
 wrap="singularity exec --nv $SIF bash -lc \"$inner\""
 
 cmd=(sbatch "${SLURM_RES[@]}" -J repro_check -o "$LOGDIR/%x_%j.out" --wrap "$wrap")

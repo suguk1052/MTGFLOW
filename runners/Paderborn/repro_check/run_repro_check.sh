@@ -8,7 +8,7 @@
 # ==============================================================================
 set -euo pipefail
 cd /home/dayoon/DCP/MTGFLOW
-LOGDIR="runners/repro_check"
+LOGDIR="runners/Paderborn/repro_check"
 
 BASE_ARGS=(--name=paderborn
     --n_blocks 2
@@ -27,8 +27,8 @@ diff <(grep "ROC score" "$LOGDIR/eval_run1.log") <(grep "ROC score" "$LOGDIR/eva
 
 echo ""
 echo "=== [1단계] 동일 시드(2024) 2회 독립 재학습 ==="
-bash runners/repro_check/train_repro_check_A.sh
-bash runners/repro_check/train_repro_check_B.sh
+bash runners/Paderborn/repro_check/train_repro_check_A.sh
+bash runners/Paderborn/repro_check/train_repro_check_B.sh
 
 echo ""
 echo "=== [1단계] test set score 배열 / AUROC 비교 (analysis/check_repro_scores.py) ==="

@@ -9,32 +9,57 @@
 
 ## 1. 프로젝트 한 줄 요약
 
-MTGFlow(시계열 이상탐지 모델)를 Paderborn(PU) bearing dataset에 적용해
-**window-level anomaly detection** 문제로 재정의하고 실험. (K = normal, KA/KI/KB = anomaly, 정의 확정됨.)
-현재 vibration_1 단일 채널(raw)을 이상탐지 대상으로 사용.
+MTGFlow(시계열 이상탐지 모델)로 **운행조건 적응형 window-level 이상탐지**를 연구한다.
+핵심 질문: **운행조건 conditioning이 안 본 조건에서 one-class 이상탐지를 개선하는가.**
+
+**메인 실험 무대가 ESTOGU로 이전됨(2026-07 기준).**
+- **Paderborn(PU) — 일단락·참조 트랙.** MTGFlow를 PU bearing에 window-level OCC로 적용
+  (K=normal, KA/KI/KB=anomaly). 진단 결과, PU는 축당 2조건뿐이라 **조건 보간 시험 불가**로 확정 →
+  PU 실험 우선 중지, 진단 결과는 논문 동기로 활용. 아래 §3~§5는 이 PU 트랙의 설계 문서(참조용).
+- **ESTOGU — 새 메인.** 전동기 데이터. 부하(payload 프록시)가 6단계·거의 등간격이라 **진짜 조건
+  보간이 가능**(예: 000·222·444 학습 → 111·333·555 테스트). 과제 = 비지도 이진 OCC(N=정상만
+  학습, {BB,BR,RB3,RB5,SW}=이상), 지표 AUROC. 우선 대상 **Without_Driver**(50 Hz 고정·부하 6단계).
+
+> **진행 현황·Phase 계획·핵심 발견은 `../TODO.md`가 단일 출처.** ESTOGU 데이터 규칙·조건축
+> 해석·주의사항은 `../Data/ESTOGU/CLAUDE.md`. 이 문서(§3 이후)는 주로 PU 트랙 운영 매뉴얼이며,
+> ESTOGU 로더/실험 코드가 붙는 대로 이 문서에 ESTOGU 절을 확장한다.
 
 ---
 
 ## 2. 디렉토리 / 경로
 
-- 작업 루트: `/home/dayoon/DCP` (여기서 Claude Code 실행)
-- 데이터: `/home/dayoon/DCP/Data/Paderborn` (상세는 그 폴더의 CLAUDE.md)
-- 모델·실험: `/home/dayoon/DCP/MTGFLOW`
-- 실험 결과: `/home/dayoon/DCP/MTGFLOW/results/Paderborn`
-  - 결과가 누적되며, 완료된 실험은 사용자가 수동으로 하위 폴더에 묶어 정리함
-  - 정리를 도울 땐 어떻게 묶을지 먼저 확인
-- 실행 스크립트: `/home/dayoon/DCP/MTGFLOW/runners`
-  - `run_Paderborn_1.sh` 등은 **Codex가 만든 예시일 뿐**, 실제 실험 아님.
-  - 진짜 실험 조합은 하위 폴더에 정리됨. 예:
-    `runners/LONO_C2_measured/run_Paderborn_CA_012to3_LONO1_m_test.sh`
+- 작업 루트: `/home/dyhwang/DCP` (여기서 Claude Code 실행)
+- 데이터:
+  - `/home/dyhwang/DCP/Data/ESTOGU` — **현재 메인** (규칙은 그 폴더의 `CLAUDE.md`)
+  - `/home/dyhwang/DCP/Data/Paderborn` — PU(참조) (상세는 그 폴더의 CLAUDE.md)
+- 모델·실험: `/home/dyhwang/DCP/MTGFLOW`
+- **실험 결과 `results/` — 데이터셋별로 묶는다.**
+  - `results/Paderborn/` — PU 결과(참조). 완료 실험은 사용자가 수동으로 하위 폴더에 묶어 정리.
+  - `results/ESTOGU/` — ESTOGU 결과(예정, 아직 없음).
+  - 정리를 도울 땐 어떻게 묶을지 먼저 확인.
+- **실행 스크립트 `runners/` — 데이터셋별로 묶는다 (2026-07 정리 완료).**
+  - `runners/Paderborn/` — PU 실험 스크립트 전부(하위 배치 폴더 `LONO_*`, `LOSO_*`, `contrast_lossobs`,
+    `repro_check`, `unused/` 등). PU 예시 `run_Paderborn_1{,_test}.sh`도 여기.
+  - `runners/ESTOGU/` — ESTOGU 실험 스크립트(예정, 아직 없음).
+  - `runners/slurm_run.sh`, `runners/slurm_logs/` — **데이터셋 무관 공용**이라 최상위 유지.
+    `run_{MSL,PSM,SMD,SWaT,WADI}*.sh`는 원저자/타 데이터셋 예시(참고용).
+  - `run_Paderborn_1.sh` 등은 **Codex가 만든 예시일 뿐**, 실제 실험 아님. 진짜 실험 조합은
+    `runners/Paderborn/<배치폴더>/` 하위에 있음. 예:
+    `runners/Paderborn/LONO_C2_measured/run_Paderborn_CA_012to3_LONO1_m_test.sh`
   - → **몇 개 열어보고 파일명 규칙과 인자 패턴을 대략 파악할 것.**
     (파일명에 setting split, LONO idx, measured 여부 등이 인코딩되어 있음)
+  - ⚠️ runner `.sh` 상당수는 **로컬 실험 세팅이라 git 미추적**(의도적). 이미 추적 중인 스크립트만 유지.
+
+### ESTOGU 로더/실험 (신설 예정 — TODO Phase 1)
+- 로더: `Dataset/estogu.py`(가칭, 아직 없음) — `paderborn.py` 대응(CSV 로딩, 선택 채널 sliding window,
+  normal-only OCC, train-normal에만 scaler fit, 파일경계 window 비겹침, 파일명 prefix→이진 라벨).
+- 상세 설계·확정 파라미터(채널=진동 1축, window/stride=2048/1024, fs=34,482.76 Hz)는 `../TODO.md` 참조.
 
 봐야 할 핵심 파일:
 - `Dataset/paderborn.py` — loader (.mat 읽기, split 구성, sliding window, metadata 파싱)
 - `main.py` — 학습 진입점 (Paderborn CLI args를 loader에 전달)
 - `test.py` — 테스트/평가 (학습 때 쓴 split/scaler/checkpoint/threshold와 일관성 유지)
-- `runners/` 하위 폴더의 실제 실험 `.sh` 파일들
+- `runners/Paderborn/` 하위 폴더의 실제 실험 `.sh` 파일들
 
 ---
 
@@ -47,7 +72,7 @@ MTGFlow(시계열 이상탐지 모델)를 Paderborn(PU) bearing dataset에 적�
 
 ---
 
-## 4. 실험 설계 전체 지도 (설계 참조)
+## 4. 실험 설계 전체 지도 (설계 참조) — **PU 트랙 (일단락/참조)**
 
 ### Baseline
 - **B1. Single-setting**: 각 setting 하나씩 (`S0_A_vib` … `S3_A_vib`)
@@ -93,7 +118,7 @@ MTGFlow(시계열 이상탐지 모델)를 Paderborn(PU) bearing dataset에 적�
 
 ---
 
-## 5. Measured operational condition (설계 참조)
+## 5. Measured operational condition (설계 참조) — **PU 트랙 (일단락/참조)**
 
 **핵심 아이디어:** 파일명에서 뽑은 고정값 `[rpm, torque, force]` 대신,
 **실제 측정된 speed/torque/force 시계열**을 연속 운행 정보로 사용한다.
@@ -189,10 +214,11 @@ cross-domain 실험에서 정보가 섞임(누수).
   - 로그: `runners/slurm_logs/<jobname>_<jobid>.out` (gitignore됨).
 
 **배치 묶음:** 실험 조합·순서는 배치별 submit 스크립트로 하드코딩(위 §7 선호 방식).
-예: `runners/LONO_B2_5seeds/submit_LONO_B2_5seeds_chain.sh` — 내부에서 `slurm_run.sh`에
+예: `runners/Paderborn/LONO_B2_5seeds/submit_LONO_B2_5seeds_chain.sh` — 내부에서 `slurm_run.sh`에
 순서대로 학습 스크립트를 넘긴다. 새 배치는 이 파일을 복사해 목록만 바꾼다.
+(submit 스크립트 안 경로는 MTGFLOW 기준 상대이므로 데이터셋 폴더(`runners/Paderborn/…`) 기준으로 적는다.)
 
-**모니터링/중단:** `squeue -u dayoon` / `runners/slurm_logs/*.out` (Read) / `scancel <jobid>`.
+**모니터링/중단:** `squeue -u dyhwang` / `runners/slurm_logs/*.out` (Read) / `scancel <jobid>`.
 
 **주의:** 실험 `.sh`는 **포그라운드**여야 한다(끝에 `&` 금지). 백그라운드면 잡이 먼저 끝나
 학습이 죽는다. 실제 제출(GPU 사용)은 **사용자 승인 후** 실행한다(GPU 자원 정책).
@@ -224,7 +250,8 @@ cross-domain 실험에서 정보가 섞임(누수).
 
 ## 8. 세션 시작 권장 순서
 
-1. `MTGFLOW/` 구조 훑기 — `main.py` / `test.py` / `Dataset/paderborn.py`.
-2. `runners/` 하위 폴더의 실제 실험 `.sh` 몇 개를 열어 파일명·인자 규칙 파악.
-3. 필요 시 `results/Paderborn/C2_measured` 등 최근 결과 형식 확인.
-4. 그 다음 요청 작업 시작.
+1. `../TODO.md`로 현재 트랙(ESTOGU 메인 / PU 참조)·Phase 확인.
+2. `MTGFLOW/` 구조 훑기 — `main.py` / `test.py` / `Dataset/paderborn.py`(ESTOGU 로더는 미생성).
+3. `runners/Paderborn/` 하위 폴더의 실제 실험 `.sh` 몇 개를 열어 파일명·인자 규칙 파악.
+4. 필요 시 `results/Paderborn/C2_measured` 등 최근 결과 형식 확인(PU 참조).
+5. 그 다음 요청 작업 시작.

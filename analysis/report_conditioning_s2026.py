@@ -105,16 +105,20 @@ def summarize(rows):
     return summary, win
 
 
+def bold_if(text, cond):
+    """cond가 True면 마크다운 볼드로 감싼다 (행별 최고값 강조용)."""
+    return f"**{text}**" if cond else text
+
+
 def render_detail_table(rows):
     lines = [
-        "| LONO split | Test normal | no-meta | static | measured-concat | **FiLM** | best |",
+        "| LONO split | Test normal | no-meta | static | measured-concat | FiLM | best |",
         "|---|---|---|---|---|---|---|",
     ]
     for lono, test_norm, vals, best in rows:
-        lines.append(
-            f"| LONO-{lono} | {test_norm} | {fmt(vals['no-meta'])} | {fmt(vals['static'])} | "
-            f"{fmt(vals['measured'])} | **{fmt(vals['FiLM'])}** | {COND_LABEL[best]} |"
-        )
+        # best = 4종 중 최고 AUROC 조건 → 그 셀만 볼드 (비교 편의)
+        cells = " | ".join(bold_if(fmt(vals[c]), c == best) for c in CONDITIONS)
+        lines.append(f"| LONO-{lono} | {test_norm} | {cells} | {COND_LABEL[best]} |")
     return lines
 
 
@@ -123,9 +127,11 @@ def render_summary_table(summary, win):
         "| Model | Mean AUROC | Median AUROC |",
         "|---|---|---|",
     ]
+    best_mean = max(CONDITIONS, key=lambda c: summary[c]["mean"])  # 4종 중 최고 mean 조건
     for c in CONDITIONS:
         s = summary[c]
-        lines.append(f"| {COND_LABEL[c]} | {s['mean']:.3f} | {s['median']:.3f} |")
+        mean_cell = bold_if(f"{s['mean']:.3f}", c == best_mean)
+        lines.append(f"| {COND_LABEL[c]} | {mean_cell} | {s['median']:.3f} |")
     d_nm = summary["FiLM"]["mean"] - summary["no-meta"]["mean"]
     d_ms = summary["FiLM"]["mean"] - summary["measured"]["mean"]
     lines.append(f"| Δ(FiLM−no-meta) | {d_nm:+.3f} | - |")
@@ -194,10 +200,9 @@ def main():
     lines.append("| LOSO split | 설명 | no-meta | static | measured-concat | FiLM | FiLM win vs no-meta |")
     lines.append("|---|---|---|---|---|---|---|")
     for split, desc, summary, win in overview_rows:
-        lines.append(
-            f"| {split} | {desc} | {summary['no-meta']['mean']:.3f} | {summary['static']['mean']:.3f} | "
-            f"{summary['measured']['mean']:.3f} | {summary['FiLM']['mean']:.3f} | {win['vs_nometa']}/6 |"
-        )
+        best_c = max(CONDITIONS, key=lambda c: summary[c]["mean"])  # 행별 최고 mean 조건
+        cells = " | ".join(bold_if(f"{summary[c]['mean']:.3f}", c == best_c) for c in CONDITIONS)
+        lines.append(f"| {split} | {desc} | {cells} | {win['vs_nometa']}/6 |")
     lines.append("")
 
     overall_mean = {c: statistics.mean(loso_all[c]) for c in CONDITIONS}
@@ -206,8 +211,9 @@ def main():
     win_ms = sum(1 for f, b in zip(loso_all["FiLM"], loso_all["measured"]) if f > b)
     lines.append("| Model | 전체(24 셀) Mean AUROC |")
     lines.append("|---|---|")
+    best_overall = max(CONDITIONS, key=lambda c: overall_mean[c])  # 24셀 최고 mean 조건
     for c in CONDITIONS:
-        lines.append(f"| {COND_LABEL[c]} | {overall_mean[c]:.3f} |")
+        lines.append(f"| {COND_LABEL[c]} | {bold_if(f'{overall_mean[c]:.3f}', c == best_overall)} |")
     lines.append(f"| Δ(FiLM−no-meta) | {overall_mean['FiLM']-overall_mean['no-meta']:+.3f} |")
     lines.append(f"| Δ(FiLM−measured-concat) | {overall_mean['FiLM']-overall_mean['measured']:+.3f} |")
     lines.append("")

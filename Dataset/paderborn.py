@@ -111,13 +111,17 @@ def summarize_measured_meta(op_signals, start, end, measured_meta_stats, vibrati
 
 
 class Paderborn_dataset(Dataset):
-    def __init__(self, windows, labels, window_size, ids=None, metas=None) -> None:
+    def __init__(self, windows, labels, window_size, ids=None, metas=None, rms_z=None) -> None:
         super(Paderborn_dataset, self).__init__()
-        self.windows = windows  
-        self.label = labels     
+        self.windows = windows
+        self.label = labels
         self.window_size = window_size
         self.ids = np.array(ids) if ids is not None else np.array(['unknown'] * len(windows))
         self.metas = np.asarray(metas, dtype=np.float32) if metas is not None else np.zeros((len(windows), 3), dtype=np.float32)
+        # 작업 D(진폭 confound 교정): window별 z-scored log-RMS를 스코어 페널티용 feature로 carry.
+        # 진폭 정규화(amp_normalize)를 쓰지 않는 실행에선 0으로 채워 하위호환.
+        self.rms_z = (np.asarray(rms_z, dtype=np.float32).reshape(-1, 1)
+                      if rms_z is not None else np.zeros((len(windows), 1), dtype=np.float32))
 
     def __len__(self):
         return len(self.windows)
@@ -125,7 +129,8 @@ class Paderborn_dataset(Dataset):
     def __getitem__(self, index):
         # [Batch, Length, 1] -> MTGFlow 규격 맞춤 [1, Length, 1]
         window_data = self.windows[index].reshape([self.window_size, -1, 1])
-        return torch.FloatTensor(window_data).transpose(0, 1), self.label[index], index, torch.FloatTensor(self.metas[index])
+        return (torch.FloatTensor(window_data).transpose(0, 1), self.label[index], index,
+                torch.FloatTensor(self.metas[index]), torch.FloatTensor(self.rms_z[index]))
 
 
 def loader_Paderborn_OCC(root=_DATA_ROOT,
@@ -143,6 +148,8 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
                          sensor_mode='vibration_1',
                          meta_source='static',
                          measured_meta_stats='meanstd',
+                         amp_normalize=False,
+                         rms_eps=1e-8,
                          vibration_sampling_rate=64000,
                          op_sampling_rate=4000):
     """
@@ -245,6 +252,7 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
         extracted_windows = []
         extracted_ids = []
         extracted_metas = []
+        extracted_rms = []  # 작업 D: window별 원 RMS(정규화 전, 비-z-score)
         setting_window_counts = {}
         for folder_path, f in file_tuple_list:
             bearing_id = extract_bearing_id(f)
@@ -269,7 +277,15 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
             # 파일 단위 경계면을 침범하지 않는 독립 슬라이딩
             start = 0
             while start + window_size <= len(scaled_sig):
-                extracted_windows.append(scaled_sig[start:start + window_size])
+                w = scaled_sig[start:start + window_size]
+                # 작업 D 진폭 교정: per-window RMS(평균 제거 X, 작업 B 정의와 동일 sqrt(mean(x²)))를
+                # 떼어 shape에 집중. amp_normalize면 window를 RMS로 나눠 단위진폭(mean(x²)≈1)으로 만들고,
+                # 떼어낸 원 RMS는 별도 보존(게이트 (a)용 원 RMS + 스코어 페널티용 z-score 재료).
+                rms = float(np.sqrt(np.mean(w ** 2)))
+                if amp_normalize:
+                    w = w / (rms + rms_eps)
+                extracted_windows.append(w)
+                extracted_rms.append(rms)
                 extracted_ids.append(bearing_id)
                 if meta_source == 'measured':
                     meta = summarize_measured_meta(
@@ -284,18 +300,44 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
                 start += stride_size
                 
         if not extracted_windows:
-            return np.empty((0, window_size)), np.array([], dtype=str), np.empty((0, meta_input_dim), dtype=np.float32), setting_window_counts
-        return np.array(extracted_windows), np.array(extracted_ids), np.array(extracted_metas, dtype=np.float32), setting_window_counts
+            return (np.empty((0, window_size)), np.array([], dtype=str),
+                    np.empty((0, meta_input_dim), dtype=np.float32),
+                    np.empty((0,), dtype=np.float32), setting_window_counts)
+        return (np.array(extracted_windows), np.array(extracted_ids),
+                np.array(extracted_metas, dtype=np.float32),
+                np.array(extracted_rms, dtype=np.float32), setting_window_counts)
 
     # 🚀 Step 4: 멀티 도메인 데이터셋 윈도우 가공 및 빌딩
-    train_x, train_ids_per_window, train_meta, train_setting_counts = extract_scaled_windows(train_file_tuples)
-    val_x, val_ids_per_window, val_meta, val_setting_counts = extract_scaled_windows(val_file_tuples)
-    test_norm_x, test_norm_ids_per_window, test_norm_meta, test_norm_setting_counts = extract_scaled_windows(test_normal_file_tuples)
-    test_fault_x, test_fault_ids_per_window, test_fault_meta, test_fault_setting_counts = extract_scaled_windows(test_fault_file_tuples)
+    train_x, train_ids_per_window, train_meta, train_rms, train_setting_counts = extract_scaled_windows(train_file_tuples)
+    val_x, val_ids_per_window, val_meta, val_rms, val_setting_counts = extract_scaled_windows(val_file_tuples)
+    test_norm_x, test_norm_ids_per_window, test_norm_meta, test_norm_rms, test_norm_setting_counts = extract_scaled_windows(test_normal_file_tuples)
+    test_fault_x, test_fault_ids_per_window, test_fault_meta, test_fault_rms, test_fault_setting_counts = extract_scaled_windows(test_fault_file_tuples)
 
     test_x = np.concatenate([test_norm_x, test_fault_x], axis=0)
     test_ids_per_window = np.concatenate([test_norm_ids_per_window, test_fault_ids_per_window], axis=0)
     test_meta = np.concatenate([test_norm_meta, test_fault_meta], axis=0)
+    test_rms = np.concatenate([test_norm_rms, test_fault_rms], axis=0)
+
+    # 작업 D: log-RMS를 train-normal 기준 z-score → 스코어 페널티(z_rms)용 feature.
+    # measured meta z-score(누수 방지, train stats로만 fit)와 동일 규약. amp_normalize=False여도
+    # 통계는 계산해 두되 rms_z가 스코어에 쓰이는지는 test.py의 rms_lambda가 결정한다.
+    train_logrms = np.log(train_rms + rms_eps) if len(train_rms) else train_rms
+    val_logrms = np.log(val_rms + rms_eps) if len(val_rms) else val_rms
+    test_logrms = np.log(test_rms + rms_eps) if len(test_rms) else test_rms
+    if len(train_logrms):
+        train_logrms_mean = float(train_logrms.mean())
+        train_logrms_std = float(train_logrms.std())
+    else:
+        train_logrms_mean, train_logrms_std = 0.0, 1.0
+
+    def _zscore_logrms(a):
+        if not len(a):
+            return a.astype(np.float32) if hasattr(a, 'astype') else np.empty((0,), dtype=np.float32)
+        return ((a - train_logrms_mean) / (train_logrms_std + 1e-8)).astype(np.float32)
+
+    train_rms_z = _zscore_logrms(train_logrms)
+    val_rms_z = _zscore_logrms(val_logrms)
+    test_rms_z = _zscore_logrms(test_logrms)
 
     if meta_source == 'measured':
         train_meta_mean = train_meta.mean(axis=0)
@@ -341,10 +383,25 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
             merged_test_counts[setting_name] = merged_test_counts.get(setting_name, 0) + count
     print_setting_summary('Test', merged_test_counts)
 
+    if amp_normalize:
+        print(f'Amplitude Normalize: per-window RMS (log-RMS train z-score: mean={train_logrms_mean:.4f}, std={train_logrms_std:.4f})')
+
     # 파이토치 데이터로더 패킹 및 반환
-    train_loader = DataLoader(Paderborn_dataset(train_x, train_y, window_size, train_ids_per_window, train_meta), batch_size=batch_size, shuffle=not label)
-    val_loader = DataLoader(Paderborn_dataset(val_x, val_y, window_size, val_ids_per_window, val_meta), batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(Paderborn_dataset(test_x, test_y, window_size, test_ids_per_window, test_meta), batch_size=batch_size, shuffle=False)
+    train_ds = Paderborn_dataset(train_x, train_y, window_size, train_ids_per_window, train_meta, train_rms_z)
+    val_ds = Paderborn_dataset(val_x, val_y, window_size, val_ids_per_window, val_meta, val_rms_z)
+    test_ds = Paderborn_dataset(test_x, test_y, window_size, test_ids_per_window, test_meta, test_rms_z)
+
+    # 작업 D: 게이트 (a)용 원 RMS(정규화 전, 비-z-score)와 train z-score 통계를 dataset에 노출.
+    # 진단 스크립트가 test_loader.dataset.rms_raw / train_logrms_mean 등으로 접근한다.
+    for ds, rms_arr in ((train_ds, train_rms), (val_ds, val_rms), (test_ds, test_rms)):
+        ds.rms_raw = np.asarray(rms_arr, dtype=np.float32)
+        ds.train_logrms_mean = train_logrms_mean
+        ds.train_logrms_std = train_logrms_std
+        ds.amp_normalize = bool(amp_normalize)
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=not label)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
     return train_loader, val_loader, test_loader, n_sensor
 

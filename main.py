@@ -42,6 +42,15 @@ parser.add_argument('--measured_meta_stats', type=str, default='meanstd', choice
                     help='Window-level statistics for measured operational metadata.')
 parser.add_argument('--meta_inject', type=str, default='concat', choices=['concat', 'film'],
                     help="Meta 주입 방식: 'concat'(기존, condition C에 C_op를 이어붙임) 또는 'film'(C_op로 C를 곱·덧셈 변조; 항등 초기화).")
+# 작업 D(진폭 confound 교정 전처리)
+parser.add_argument('--amp_normalize', action='store_true',
+                    help='작업 D: window별 RMS로 진동 window를 정규화(shape-only)하고 떼어낸 log-RMS를 별도 feature로 보존.')
+parser.add_argument('--rms_lambda', type=float, default=0.0,
+                    help='작업 D: 진폭 페널티 가중치. anomaly score = flow_NLL(shape) + rms_lambda*0.5*penalty(z_rms). 학습엔 무영향(eval-only). 0이면 순수 shape 스코어.')
+parser.add_argument('--rms_penalty', type=str, default='one-sided', choices=['one-sided', 'two-sided'],
+                    help="작업 D: z_rms 페널티 형태. 'one-sided'=max(0,z_rms)²(고진폭만), 'two-sided'=z_rms².")
+parser.add_argument('--rms_eps', type=float, default=1e-8,
+                    help='작업 D: per-window RMS 정규화/로그의 0-분산 방어 eps.')
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
 parser.add_argument('--sampling_rate', type=float, default=1.0,
@@ -131,6 +140,14 @@ def build_paderborn_metadata(args):
         'meta_input_dim': int(resolve_meta_input_dim(args)),
         'meta_emb_dim': int(args.meta_emb_dim),
         'meta_inject': args.meta_inject,
+        # 작업 D(진폭 confound 교정)
+        'amp_normalize': bool(args.amp_normalize),
+        'rms_lambda': float(args.rms_lambda),
+        'rms_penalty': args.rms_penalty,
+        'rms_eps': float(args.rms_eps),
+        'rms_feature': 'log_rms',
+        'train_logrms_mean': float(getattr(args, 'train_logrms_mean', 0.0)),
+        'train_logrms_std': float(getattr(args, 'train_logrms_std', 1.0)),
     }
 
 def resolve_save_path(args):
@@ -207,8 +224,14 @@ for seed in args.seeds:
             test_norm_ids=args.test_norm_ids,
             exclude_ids=args.exclude_ids,
             meta_source=args.meta_source,
-            measured_meta_stats=args.measured_meta_stats
+            measured_meta_stats=args.measured_meta_stats,
+            amp_normalize=args.amp_normalize,
+            rms_eps=args.rms_eps
         )
+        # 작업 D: 진폭 정규화 시 train-normal log-RMS 통계를 checkpoint metadata에 앵커로 저장
+        # (test 재구성이 동일 통계를 쓰는지 검증용). 로더가 dataset 속성으로 노출.
+        args.train_logrms_mean = float(getattr(train_loader.dataset, 'train_logrms_mean', 0.0))
+        args.train_logrms_std = float(getattr(train_loader.dataset, 'train_logrms_std', 1.0))
 
     # %%
     model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject)

@@ -41,6 +41,16 @@ parser.add_argument('--measured_meta_stats', type=str, default='meanstd', choice
                     help='Window-level statistics for measured operational metadata.')
 parser.add_argument('--meta_inject', type=str, default='concat', choices=['concat', 'film'],
                     help="Meta 주입 방식: 'concat'(기존) 또는 'film'(C_op로 C를 변조). checkpoint 값으로 복원.")
+# 작업 D(진폭 confound 교정 전처리). amp_normalize/rms_penalty/rms_eps는 checkpoint 값으로 복원.
+# rms_lambda는 평가 시 CLI로 명시(val 기준 사전 고정값). CLI 미지정 시 checkpoint 값 사용.
+parser.add_argument('--amp_normalize', action='store_true',
+                    help='작업 D: window별 RMS 정규화 사용(학습 checkpoint와 일치해야 함). 미지정 시 checkpoint 값으로 복원.')
+parser.add_argument('--rms_lambda', type=float, default=None,
+                    help='작업 D: 진폭 페널티 가중치(val 기준 사전 고정값). anomaly score = flow_NLL + rms_lambda*0.5*penalty(z_rms). 미지정 시 checkpoint 값.')
+parser.add_argument('--rms_penalty', type=str, default=None, choices=['one-sided', 'two-sided'],
+                    help="작업 D: z_rms 페널티 형태. 미지정 시 checkpoint 값으로 복원.")
+parser.add_argument('--rms_eps', type=float, default=None,
+                    help='작업 D: per-window RMS eps. 미지정 시 checkpoint 값으로 복원.')
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
 parser.add_argument('--sampling_rate', type=float, default=1.0,
@@ -128,6 +138,14 @@ def build_paderborn_metadata(args):
         'meta_input_dim': int(resolve_meta_input_dim(args)),
         'meta_emb_dim': int(args.meta_emb_dim),
         'meta_inject': args.meta_inject,
+        # 작업 D(진폭 confound 교정)
+        'amp_normalize': bool(args.amp_normalize),
+        'rms_lambda': float(args.rms_lambda) if args.rms_lambda is not None else 0.0,
+        'rms_penalty': args.rms_penalty if args.rms_penalty is not None else 'one-sided',
+        'rms_eps': float(args.rms_eps) if args.rms_eps is not None else 1e-8,
+        'rms_feature': 'log_rms',
+        'train_logrms_mean': float(getattr(args, 'train_logrms_mean', 0.0)),
+        'train_logrms_std': float(getattr(args, 'train_logrms_std', 1.0)),
     }
 
 
@@ -165,6 +183,19 @@ def reconcile_paderborn_args_with_checkpoint(args, checkpoint):
     if not option_was_provided('--meta_inject'):
         # 구 checkpoint(meta_inject 키 없음)는 기존 concat으로 복원.
         args.meta_inject = metadata.get('meta_inject', args.meta_inject)
+    # 작업 D: 진폭 교정 관련 인자 복원. 구 checkpoint(키 없음)는 amp_normalize=False/rms_lambda=0으로
+    # 하위호환(기존 B3 평가 경로 무변경). rms_lambda는 CLI로 val 기준 사전 고정값을 주는 것이 표준.
+    if not option_was_provided('--amp_normalize'):
+        args.amp_normalize = bool(metadata.get('amp_normalize', False))
+    if args.rms_lambda is None:
+        args.rms_lambda = float(metadata.get('rms_lambda', 0.0))
+    if args.rms_penalty is None:
+        args.rms_penalty = metadata.get('rms_penalty', 'one-sided')
+    if args.rms_eps is None:
+        args.rms_eps = float(metadata.get('rms_eps', 1e-8))
+    # train-normal log-RMS z-score 통계 앵커(로더가 재계산하지만 checkpoint 값으로 검증).
+    args.ckpt_train_logrms_mean = metadata.get('train_logrms_mean')
+    args.ckpt_train_logrms_std = metadata.get('train_logrms_std')
     return configure_paderborn_args(args)
 
 def resolve_checkpoint_path(args):
@@ -260,7 +291,9 @@ def build_loaders(args):
             test_norm_ids=args.test_norm_ids,
             exclude_ids=args.exclude_ids,
             meta_source=args.meta_source,
-            measured_meta_stats=args.measured_meta_stats
+            measured_meta_stats=args.measured_meta_stats,
+            amp_normalize=args.amp_normalize,
+            rms_eps=args.rms_eps if args.rms_eps is not None else 1e-8
         )
     else:
         raise ValueError(f'Unsupported dataset name: {args.name}')
@@ -286,6 +319,17 @@ def compute_scores(loader, model, measure_speed=False):
             model_only_sec += time.perf_counter() - model_start
 
             loss = loss_tensor.cpu().numpy()
+            # 작업 D: anomaly score = flow_NLL(shape) + rms_lambda*0.5*penalty(z_rms).
+            # 진폭형 결함을 z_rms 페널티로 살린다. param-free·eval-only이며, 순수 model 추론시간
+            # 오염을 막으려 속도 측정 구간(model_start~) 밖에서 더한다. rms_lambda=0이면 순수 shape.
+            rms_lambda = getattr(args, 'rms_lambda', 0.0) or 0.0
+            if rms_lambda and len(batch) > 4:
+                z = batch[4].cpu().numpy().reshape(-1)
+                if getattr(args, 'rms_penalty', 'one-sided') == 'two-sided':
+                    pen = 0.5 * z ** 2
+                else:
+                    pen = 0.5 * np.maximum(0.0, z) ** 2
+                loss = loss + rms_lambda * pen
             scores.append(loss)
             num_windows += batch_size
     synchronize_if_cuda()
@@ -305,7 +349,8 @@ def warn_if_metadata_mismatch(checkpoint, reference_metadata):
         return
     for key in ('load_setting', 'train_load_setting', 'test_load_setting', 'sensor_mode',
                 'train_ids', 'val_ids', 'test_norm_ids', 'window_size', 'stride_size',
-                'use_meta', 'meta_source', 'measured_meta_stats', 'meta_input_dim', 'meta_emb_dim', 'meta_inject'):
+                'use_meta', 'meta_source', 'measured_meta_stats', 'meta_input_dim', 'meta_emb_dim', 'meta_inject',
+                'amp_normalize', 'rms_penalty', 'rms_eps'):
         if metadata.get(key) != reference_metadata.get(key):
             print(f"⚠️ Warning: seed checkpoint {key}={metadata.get(key)} differs from "
                   f"reference {key}={reference_metadata.get(key)}. 결과가 시드 간 비교 불가능할 수 있음.")
@@ -393,6 +438,11 @@ def evaluate_run(run_name, model, test_loader, val_loader, paderborn_mode, refer
                 'val_ids': list(args.val_ids),
                 'test_norm_ids': list(args.test_norm_ids),
                 'exclude_ids': list(args.exclude_ids),
+                # 작업 D(진폭 confound 교정)
+                'amp_normalize': bool(args.amp_normalize),
+                'rms_lambda': float(args.rms_lambda) if args.rms_lambda is not None else 0.0,
+                'rms_penalty': args.rms_penalty if args.rms_penalty is not None else 'one-sided',
+                'rms_eps': float(args.rms_eps) if args.rms_eps is not None else 1e-8,
             },
             'model_config': {
                 'model': args.model,
@@ -474,6 +524,15 @@ if args.name.lower() == 'paderborn':
     print(f"Test Settings: {test_settings}")
 
 train_loader, val_loader, test_loader, n_sensor = build_loaders(args)
+
+# 작업 D: 로더가 재계산한 train-normal log-RMS z-score 통계가 checkpoint 앵커와 일치하는지 검증
+# (동일 train 데이터면 결정적으로 동일해야 함 — 불일치 시 데이터/split 구성 오류 신호).
+if args.name.lower() == 'paderborn' and getattr(args, 'amp_normalize', False):
+    recomputed_mean = float(getattr(train_loader.dataset, 'train_logrms_mean', 0.0))
+    ckpt_mean = getattr(args, 'ckpt_train_logrms_mean', None)
+    if ckpt_mean is not None and abs(recomputed_mean - float(ckpt_mean)) > 1e-4:
+        print(f"⚠️ Warning: recomputed train_logrms_mean={recomputed_mean:.6f} differs from "
+              f"checkpoint anchor={float(ckpt_mean):.6f}. 진폭 z-score 통계 불일치 — split 구성 확인 필요.")
 
 model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject)
 model = model.to(device)

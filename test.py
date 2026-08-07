@@ -45,6 +45,8 @@ parser.add_argument('--meta_inject', type=str, default='concat', choices=['conca
 # rms_lambda는 평가 시 CLI로 명시(val 기준 사전 고정값). CLI 미지정 시 checkpoint 값 사용.
 parser.add_argument('--amp_normalize', action='store_true',
                     help='작업 D: window별 RMS 정규화 사용(학습 checkpoint와 일치해야 함). 미지정 시 checkpoint 값으로 복원.')
+parser.add_argument('--amp_normalize_channels', type=str, default=None, choices=['all', 'vib_only'],
+                    help="작업 F-2: 정규화 대상 채널(학습과 일치해야 함). 미지정 시 checkpoint 값으로 복원.")
 parser.add_argument('--rms_lambda', type=float, default=None,
                     help='작업 D: 진폭 페널티 가중치(val 기준 사전 고정값). anomaly score = flow_NLL + rms_lambda*0.5*penalty(z_rms). 미지정 시 checkpoint 값.')
 parser.add_argument('--rms_penalty', type=str, default=None, choices=['one-sided', 'two-sided'],
@@ -187,6 +189,8 @@ def reconcile_paderborn_args_with_checkpoint(args, checkpoint):
     # 하위호환(기존 B3 평가 경로 무변경). rms_lambda는 CLI로 val 기준 사전 고정값을 주는 것이 표준.
     if not option_was_provided('--amp_normalize'):
         args.amp_normalize = bool(metadata.get('amp_normalize', False))
+    if args.amp_normalize_channels is None:
+        args.amp_normalize_channels = metadata.get('amp_normalize_channels', 'all')
     if args.rms_lambda is None:
         args.rms_lambda = float(metadata.get('rms_lambda', 0.0))
     if args.rms_penalty is None:
@@ -293,6 +297,7 @@ def build_loaders(args):
             meta_source=args.meta_source,
             measured_meta_stats=args.measured_meta_stats,
             amp_normalize=args.amp_normalize,
+            amp_normalize_channels=args.amp_normalize_channels if args.amp_normalize_channels is not None else 'all',
             rms_eps=args.rms_eps if args.rms_eps is not None else 1e-8
         )
     else:
@@ -350,7 +355,7 @@ def warn_if_metadata_mismatch(checkpoint, reference_metadata):
     for key in ('load_setting', 'train_load_setting', 'test_load_setting', 'sensor_mode',
                 'train_ids', 'val_ids', 'test_norm_ids', 'window_size', 'stride_size',
                 'use_meta', 'meta_source', 'measured_meta_stats', 'meta_input_dim', 'meta_emb_dim', 'meta_inject',
-                'amp_normalize', 'rms_penalty', 'rms_eps'):
+                'amp_normalize', 'amp_normalize_channels', 'rms_penalty', 'rms_eps'):
         if metadata.get(key) != reference_metadata.get(key):
             print(f"⚠️ Warning: seed checkpoint {key}={metadata.get(key)} differs from "
                   f"reference {key}={reference_metadata.get(key)}. 결과가 시드 간 비교 불가능할 수 있음.")
@@ -438,8 +443,9 @@ def evaluate_run(run_name, model, test_loader, val_loader, paderborn_mode, refer
                 'val_ids': list(args.val_ids),
                 'test_norm_ids': list(args.test_norm_ids),
                 'exclude_ids': list(args.exclude_ids),
-                # 작업 D(진폭 confound 교정)
+                # 작업 D(진폭 confound 교정) / 작업 F-2(다채널 정규화 채널)
                 'amp_normalize': bool(args.amp_normalize),
+                'amp_normalize_channels': str(args.amp_normalize_channels) if args.amp_normalize_channels is not None else 'all',
                 'rms_lambda': float(args.rms_lambda) if args.rms_lambda is not None else 0.0,
                 'rms_penalty': args.rms_penalty if args.rms_penalty is not None else 'one-sided',
                 'rms_eps': float(args.rms_eps) if args.rms_eps is not None else 1e-8,

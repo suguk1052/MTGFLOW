@@ -45,6 +45,9 @@ parser.add_argument('--meta_inject', type=str, default='concat', choices=['conca
 # 작업 D(진폭 confound 교정 전처리)
 parser.add_argument('--amp_normalize', action='store_true',
                     help='작업 D: window별 RMS로 진동 window를 정규화(shape-only)하고 떼어낸 log-RMS를 별도 feature로 보존.')
+parser.add_argument('--amp_normalize_channels', type=str, default='all', choices=['all', 'vib_only'],
+                    help="작업 F-2 다채널: amp_normalize 시 정규화 대상 채널. 'all'=전 채널 각자 RMS(shape-only), "
+                         "'vib_only'=채널0(진동)만 정규화하고 전류는 raw 진폭 보존. 단일채널이면 두 값이 동치.")
 parser.add_argument('--rms_lambda', type=float, default=0.0,
                     help='작업 D: 진폭 페널티 가중치. anomaly score = flow_NLL(shape) + rms_lambda*0.5*penalty(z_rms). 학습엔 무영향(eval-only). 0이면 순수 shape 스코어.')
 parser.add_argument('--rms_penalty', type=str, default='one-sided', choices=['one-sided', 'two-sided'],
@@ -140,8 +143,9 @@ def build_paderborn_metadata(args):
         'meta_input_dim': int(resolve_meta_input_dim(args)),
         'meta_emb_dim': int(args.meta_emb_dim),
         'meta_inject': args.meta_inject,
-        # 작업 D(진폭 confound 교정)
+        # 작업 D(진폭 confound 교정) / 작업 F-2(다채널 정규화 채널 선택)
         'amp_normalize': bool(args.amp_normalize),
+        'amp_normalize_channels': str(args.amp_normalize_channels),
         'rms_lambda': float(args.rms_lambda),
         'rms_penalty': args.rms_penalty,
         'rms_eps': float(args.rms_eps),
@@ -226,6 +230,7 @@ for seed in args.seeds:
             meta_source=args.meta_source,
             measured_meta_stats=args.measured_meta_stats,
             amp_normalize=args.amp_normalize,
+            amp_normalize_channels=args.amp_normalize_channels,
             rms_eps=args.rms_eps
         )
         # 작업 D: 진폭 정규화 시 train-normal log-RMS 통계를 checkpoint metadata에 앵커로 저장

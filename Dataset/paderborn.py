@@ -59,6 +59,46 @@ def extract_signal_from_mat(mat, key, sensor_name):
     raise ValueError(f"Sensor {sensor_name} not found in {key}")
 
 
+# ==============================================================================
+# 작업 F-2: 다채널(채널-as-노드) 지원.
+#   sensor_mode를 채널셋 키로 해석해 여러 채널을 n_sensor 축으로 쌓는다.
+#   Paderborn 고속채널(vibration_1, phase_current_1/2)은 모두 동일 64kHz라
+#   같은 window 인덱스로 잘라 stack하면 정렬이 맞는다(F-0에서 fs 동일 확인).
+# ==============================================================================
+SENSOR_MODE_MAP = {
+    "Vy": ["vibration_1"],
+    "C1C2": ["phase_current_1", "phase_current_2"],
+    "C1C2Vy": ["vibration_1", "phase_current_1", "phase_current_2"],
+}
+
+
+def resolve_sensor_names(sensor_mode):
+    """채널셋 키(Vy/C1C2/C1C2Vy) → 채널 이름 리스트. 키가 아니면 단일 채널로 취급(하위호환)."""
+    return list(SENSOR_MODE_MAP.get(sensor_mode, [sensor_mode]))
+
+
+def _extract_named_signal(mat, key, sensor_name):
+    """.mat에서 sensor_name 채널의 Data를 1D로 뽑는다(기존 인라인 매칭과 동일 규약). 없으면 None."""
+    for j in mat[key][0][0]:
+        if 'Name' in str(j.dtype) and sensor_name in j[0]['Name']:
+            idx = np.argwhere(j[0]['Name'] == sensor_name)
+            return np.asarray(j[0]['Data'][idx][0][0][0]).flatten()
+    return None
+
+
+def load_stacked_signals(mat, key, sensor_names):
+    """여러 채널을 (T, C)로 stack. 길이가 다르면 최소 길이로 절단. 하나라도 없으면 None.
+    단일 채널이면 (T, 1)로 반환해 downstream(scaler.fit/transform)이 채널축을 일관되게 처리."""
+    sigs = []
+    for name in sensor_names:
+        s = _extract_named_signal(mat, key, name)
+        if s is None:
+            return None
+        sigs.append(s)
+    min_len = min(len(s) for s in sigs)
+    return np.stack([s[:min_len] for s in sigs], axis=1)  # (T, C)
+
+
 def _normalize_sensor_name(name):
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
@@ -149,6 +189,7 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
                          meta_source='static',
                          measured_meta_stats='meanstd',
                          amp_normalize=False,
+                         amp_normalize_channels='all',
                          rms_eps=1e-8,
                          vibration_sampling_rate=64000,
                          op_sampling_rate=4000):
@@ -174,6 +215,11 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
     exclude_ids = set(normalize_id_list(exclude_ids))
     if meta_source not in ('static', 'measured'):
         raise ValueError("meta_source must be one of ['static', 'measured']")
+    # 작업 F-2: 채널셋 해석. 단일 채널이면 기존 동작과 완전히 동일(하위호환).
+    sensor_names = resolve_sensor_names(sensor_mode)
+    n_channels = len(sensor_names)
+    if amp_normalize_channels not in ('all', 'vib_only'):
+        raise ValueError("amp_normalize_channels must be one of ['all', 'vib_only']")
     if measured_meta_stats not in ('mean', 'meanstd'):
         raise ValueError("measured_meta_stats must be one of ['mean', 'meanstd']")
     meta_input_dim = 3 if meta_source == 'static' or measured_meta_stats == 'mean' else 6
@@ -234,25 +280,27 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
 
     # 🚀 Step 2: 다중 도메인 통합 StandardScaler 피팅 (Data Leakage 절대 방지)
     # 여러 하중 환경의 정상 신호를 모두 모아서 단 하나의 글로벌 스케일러를 학습시킵니다.
+    # 작업 F-2: 채널별 (T, C) 로딩 → StandardScaler가 채널축(axis=1)에 대해 채널별 mean/std로 fit.
+    # 단일 채널이면 (T, 1)이라 기존 reshape(-1,1)과 수치적으로 동일(하위호환).
     raw_train_signals = []
     for folder_path, f in train_file_tuples:
         mat = scipy.io.loadmat(os.path.join(folder_path, f))
         key = f.replace('.mat', '')
-        for j in mat[key][0][0]:
-            if 'Name' in str(j.dtype) and sensor_mode in j[0]['Name']:
-                idx = np.argwhere(j[0]['Name'] == sensor_mode)
-                raw_train_signals.append(j[0]['Data'][idx][0][0][0])
-                break
-    
+        sig = load_stacked_signals(mat, key, sensor_names)
+        if sig is not None:
+            raw_train_signals.append(sig)
+
+    if not raw_train_signals:
+        raise ValueError(f"❌ 지정 채널 {sensor_names}을(를) 학습 .mat에서 찾지 못했습니다.")
     scaler = StandardScaler()
-    scaler.fit(np.concatenate(raw_train_signals).reshape(-1, 1))
+    scaler.fit(np.concatenate(raw_train_signals, axis=0))
 
     # 🚀 Step 3: 파일 경계면 브레이크 없이 윈도우를 추출하는 내부 헬퍼 함수
     def extract_scaled_windows(file_tuple_list):
         extracted_windows = []
         extracted_ids = []
         extracted_metas = []
-        extracted_rms = []  # 작업 D: window별 원 RMS(정규화 전, 비-z-score)
+        extracted_rms = []  # 작업 D: window별 원 RMS(정규화 전, 비-z-score). 다채널이면 채널별 (C,)
         setting_window_counts = {}
         for folder_path, f in file_tuple_list:
             bearing_id = extract_bearing_id(f)
@@ -262,30 +310,33 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
             measured_signals = load_measured_operational_signals(mat_path) if meta_source == 'measured' else None
             mat = scipy.io.loadmat(mat_path)
             key = f.replace('.mat', '')
-            sig = None
-            for j in mat[key][0][0]:
-                if 'Name' in str(j.dtype) and sensor_mode in j[0]['Name']:
-                    idx = np.argwhere(j[0]['Name'] == sensor_mode)
-                    sig = j[0]['Data'][idx][0][0][0]
-                    break
+            # 작업 F-2: 채널을 (T, C)로 로딩 후 채널별 scaler.transform
+            sig = load_stacked_signals(mat, key, sensor_names)  # (T, C)
             if sig is None:
                 continue
-
-            # 통합 스케일러로 정규화 매핑 후 1차원 플래튼
-            scaled_sig = scaler.transform(sig.reshape(-1, 1)).flatten()
+            scaled_sig = scaler.transform(sig)  # (T, C)
 
             # 파일 단위 경계면을 침범하지 않는 독립 슬라이딩
             start = 0
             while start + window_size <= len(scaled_sig):
-                w = scaled_sig[start:start + window_size]
-                # 작업 D 진폭 교정: per-window RMS(평균 제거 X, 작업 B 정의와 동일 sqrt(mean(x²)))를
-                # 떼어 shape에 집중. amp_normalize면 window를 RMS로 나눠 단위진폭(mean(x²)≈1)으로 만들고,
-                # 떼어낸 원 RMS는 별도 보존(게이트 (a)용 원 RMS + 스코어 페널티용 z-score 재료).
-                rms = float(np.sqrt(np.mean(w ** 2)))
+                w = scaled_sig[start:start + window_size]  # (win, C)
+                # 작업 D 진폭 교정: per-window·채널별 RMS(평균 제거 X, sqrt(mean(x²)))를 떼어 shape에 집중.
+                # 작업 F-2: amp_normalize_channels로 정규화 대상 채널 선택.
+                #   all      → 전 채널 각자 RMS로 나눠 단위진폭(shape-only).
+                #   vib_only → 채널0(진동 Vy)만 정규화, 전류는 raw 진폭 보존(진폭 confound 노출용).
+                rms_vec = np.sqrt(np.mean(w ** 2, axis=0))  # (C,)
                 if amp_normalize:
-                    w = w / (rms + rms_eps)
-                extracted_windows.append(w)
-                extracted_rms.append(rms)
+                    if amp_normalize_channels == 'all':
+                        w = w / (rms_vec + rms_eps)
+                    else:  # 'vib_only'
+                        w = w.copy()
+                        w[:, 0] = w[:, 0] / (rms_vec[0] + rms_eps)
+                if n_channels == 1:
+                    extracted_windows.append(w[:, 0])        # (win,)  단일채널 하위호환
+                    extracted_rms.append(float(rms_vec[0]))  # 스칼라
+                else:
+                    extracted_windows.append(w)              # (win, C)
+                    extracted_rms.append(rms_vec.astype(np.float32))  # (C,)
                 extracted_ids.append(bearing_id)
                 if meta_source == 'measured':
                     meta = summarize_measured_meta(
@@ -300,9 +351,13 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
                 start += stride_size
                 
         if not extracted_windows:
-            return (np.empty((0, window_size)), np.array([], dtype=str),
+            empty_w = (np.empty((0, window_size)) if n_channels == 1
+                       else np.empty((0, window_size, n_channels)))
+            empty_rms = (np.empty((0,), dtype=np.float32) if n_channels == 1
+                         else np.empty((0, n_channels), dtype=np.float32))
+            return (empty_w, np.array([], dtype=str),
                     np.empty((0, meta_input_dim), dtype=np.float32),
-                    np.empty((0,), dtype=np.float32), setting_window_counts)
+                    empty_rms, setting_window_counts)
         return (np.array(extracted_windows), np.array(extracted_ids),
                 np.array(extracted_metas, dtype=np.float32),
                 np.array(extracted_rms, dtype=np.float32), setting_window_counts)
@@ -321,9 +376,16 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
     # 작업 D: log-RMS를 train-normal 기준 z-score → 스코어 페널티(z_rms)용 feature.
     # measured meta z-score(누수 방지, train stats로만 fit)와 동일 규약. amp_normalize=False여도
     # 통계는 계산해 두되 rms_z가 스코어에 쓰이는지는 test.py의 rms_lambda가 결정한다.
-    train_logrms = np.log(train_rms + rms_eps) if len(train_rms) else train_rms
-    val_logrms = np.log(val_rms + rms_eps) if len(val_rms) else val_rms
-    test_logrms = np.log(test_rms + rms_eps) if len(test_rms) else test_rms
+    # 작업 F-2: 다채널이면 채널0(진동 Vy)의 RMS로만 z-score(페널티는 진폭형 결함=진동 기준, 하위호환).
+    def _rms_for_z(rms_arr):
+        return rms_arr[:, 0] if getattr(rms_arr, 'ndim', 1) == 2 else rms_arr
+
+    train_rms_z_src = _rms_for_z(train_rms)
+    val_rms_z_src = _rms_for_z(val_rms)
+    test_rms_z_src = _rms_for_z(test_rms)
+    train_logrms = np.log(train_rms_z_src + rms_eps) if len(train_rms_z_src) else train_rms_z_src
+    val_logrms = np.log(val_rms_z_src + rms_eps) if len(val_rms_z_src) else val_rms_z_src
+    test_logrms = np.log(test_rms_z_src + rms_eps) if len(test_rms_z_src) else test_rms_z_src
     if len(train_logrms):
         train_logrms_mean = float(train_logrms.mean())
         train_logrms_std = float(train_logrms.std())
@@ -351,13 +413,13 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
     val_y = np.zeros(len(val_x))
     test_y = np.array([0] * len(test_norm_x) + [1] * len(test_fault_x))
 
-    n_sensor = 1 
+    n_sensor = n_channels  # 작업 F-2: 채널 수 = dynamic graph 노드 수
 
     print(f'Mode: {mode}')
     print(f'Train Settings: {train_loads}')
     print(f'Test Settings: {test_loads}')
     print(f'Sensor Mode: {sensor_mode}')
-    print(f'Sensor Names: {[sensor_mode]}')
+    print(f'Sensor Names: {sensor_names}')
     print(f'Metadata Source: {meta_source}')
     print(f'Measured Metadata Stats: {measured_meta_stats}')
     print(f'Metadata Input Dim: {meta_input_dim}')
@@ -384,7 +446,9 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
     print_setting_summary('Test', merged_test_counts)
 
     if amp_normalize:
-        print(f'Amplitude Normalize: per-window RMS (log-RMS train z-score: mean={train_logrms_mean:.4f}, std={train_logrms_std:.4f})')
+        norm_target = 'all channels' if amp_normalize_channels == 'all' else 'vibration(ch0) only'
+        print(f'Amplitude Normalize: per-window RMS [{norm_target}] '
+              f'(ch0 log-RMS train z-score: mean={train_logrms_mean:.4f}, std={train_logrms_std:.4f})')
 
     # 파이토치 데이터로더 패킹 및 반환
     train_ds = Paderborn_dataset(train_x, train_y, window_size, train_ids_per_window, train_meta, train_rms_z)

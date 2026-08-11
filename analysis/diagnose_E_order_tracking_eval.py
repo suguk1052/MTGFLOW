@@ -35,9 +35,12 @@ HIGH_AMP = {"K001", "K003", "K006"}
 THR_PCT = 95
 
 # fold → (checkpoint run_name(_s2026), 아카이브 B3 seed2026 raw AUROC)
+SEEDS = [2024, 2025, 2026, 2027, 2028]  # 5-seed 확장
+
+# fold → 메타. checkpoint run_dir = E_raw_023to1_{fold}_s{seed}. archive = B3 seed2026 raw AUROC(대조).
 FOLDS = {
-    "LONO1": {"run": "E_raw_023to1_LONO1_s2026", "archive_raw_auroc": 0.0876, "target": "K001", "amp": "high"},
-    "LONO2": {"run": "E_raw_023to1_LONO2_s2026", "archive_raw_auroc": 0.5808, "target": "K002", "amp": "low"},
+    "LONO1": {"archive_raw_auroc": 0.0876, "target": "K001", "amp": "high"},
+    "LONO2": {"archive_raw_auroc": 0.5808, "target": "K002", "amp": "low"},
 }
 
 
@@ -151,37 +154,88 @@ def eval_arm(ckpt, meta, device, batch_size, order_track, order_track_ref, val_t
     }
 
 
-def process_fold(fold, cfg, device, batch_size):
-    ckpt_path = os.path.join(RESULTS_ROOT, cfg["run"], "model.pth")
+def eval_seed(fold, seed, device, batch_size):
+    """한 (fold, seed) checkpoint → raw + ot_nominal 재추론. inst는 seed2026에서 이미 nominal과 동치 확인해 생략."""
+    ckpt_path = os.path.join(RESULTS_ROOT, f"E_raw_023to1_{fold}_s{seed}", "model.pth")
     if not os.path.exists(ckpt_path):
-        print(f"[skip] checkpoint 없음: {ckpt_path}")
         return None
     ckpt = torch.load(ckpt_path, map_location=device)
     meta = ckpt["paderborn_metadata"]
     assert not bool(meta["use_meta"]), "no-meta 전용 평가"
-
     raw = eval_arm(ckpt, meta, device, batch_size, order_track=False, order_track_ref="nominal")
-    val_thr = raw["val_thr"]  # source identity → val 동일. 두 arm 동일 threshold 사용.
-    ot = eval_arm(ckpt, meta, device, batch_size, True, "nominal", val_thr=val_thr)
-    ot_inst = eval_arm(ckpt, meta, device, batch_size, True, "inst", val_thr=val_thr)
-
-    # per-fault delta (OT nominal − raw)
+    ot = eval_arm(ckpt, meta, device, batch_size, True, "nominal", val_thr=raw["val_thr"])
     faults = sorted(set(raw["per_fault_auroc"]) | set(ot["per_fault_auroc"]))
-    per_fault_delta = {}
+    per_fault = {}
     for f in faults:
-        r = raw["per_fault_auroc"].get(f, {}).get("auroc", float("nan"))
-        o = ot["per_fault_auroc"].get(f, {}).get("auroc", float("nan"))
-        per_fault_delta[f] = {"raw": r, "ot": o, "delta": o - r,
-                              "family": f[:2],
-                              "n": ot["per_fault_auroc"].get(f, raw["per_fault_auroc"].get(f, {})).get("n")}
+        per_fault[f] = {
+            "raw": raw["per_fault_auroc"].get(f, {}).get("auroc", float("nan")),
+            "ot": ot["per_fault_auroc"].get(f, {}).get("auroc", float("nan")),
+            "family": f[:2],
+            "n": ot["per_fault_auroc"].get(f, raw["per_fault_auroc"].get(f, {})).get("n"),
+        }
+    return {
+        "seed": seed,
+        "raw_auroc": raw["auroc"], "ot_auroc": ot["auroc"],
+        "delta": ot["auroc"] - raw["auroc"],
+        "raw_target_norm_fpr": raw["target_norm_fpr"], "ot_target_norm_fpr": ot["target_norm_fpr"],
+        "n": {"raw": raw["n"], "ot": ot["n"]},
+        "per_fault": per_fault,
+    }
 
+
+def _ms(vals):
+    a = np.asarray([v for v in vals if v == v], dtype=float)
+    return (float(a.mean()), float(a.std())) if len(a) else (float("nan"), float("nan"))
+
+
+def process_fold(fold, cfg, device, batch_size):
+    per_seed = []
+    for s in SEEDS:
+        r = eval_seed(fold, s, device, batch_size)
+        if r is None:
+            print(f"  [skip] {fold} s{s} checkpoint 없음", file=sys.stderr)
+            continue
+        per_seed.append(r)
+        print(f"  {fold} s{s}: raw={r['raw_auroc']:.4f} ot={r['ot_auroc']:.4f} Δ={r['delta']:+.4f}",
+              file=sys.stderr)
+    if not per_seed:
+        return None
+
+    raw_m, raw_s = _ms([r["raw_auroc"] for r in per_seed])
+    ot_m, ot_s = _ms([r["ot_auroc"] for r in per_seed])
+    d_m, d_s = _ms([r["delta"] for r in per_seed])
+    rawfpr_m, _ = _ms([r["raw_target_norm_fpr"] for r in per_seed])
+    otfpr_m, _ = _ms([r["ot_target_norm_fpr"] for r in per_seed])
+
+    # per-fault: seed 평균 raw/ot/Δ
+    all_faults = sorted({f for r in per_seed for f in r["per_fault"]})
+    per_fault_agg = {}
+    for f in all_faults:
+        rr = [r["per_fault"][f]["raw"] for r in per_seed if f in r["per_fault"]]
+        oo = [r["per_fault"][f]["ot"] for r in per_seed if f in r["per_fault"]]
+        rm, _ = _ms(rr); om, _ = _ms(oo)
+        per_fault_agg[f] = {"family": f[:2], "raw_mean": rm, "ot_mean": om, "delta_mean": om - rm,
+                            "n_seeds": len(rr)}
+    # family 집계
+    fam_agg = {}
+    for fam in sorted({v["family"] for v in per_fault_agg.values()}):
+        rm, _ = _ms([v["raw_mean"] for v in per_fault_agg.values() if v["family"] == fam])
+        om, _ = _ms([v["ot_mean"] for v in per_fault_agg.values() if v["family"] == fam])
+        fam_agg[fam] = {"raw_mean": rm, "ot_mean": om, "delta_mean": om - rm}
+
+    s2026 = next((r for r in per_seed if r["seed"] == 2026), None)
     return {
         "fold": fold, "target": cfg["target"], "amp_group": cfg["amp"],
         "archive_raw_auroc": cfg["archive_raw_auroc"],
-        "raw": raw, "ot_nominal": ot, "ot_inst": ot_inst,
-        "delta_auroc_ot_minus_raw": ot["auroc"] - raw["auroc"],
-        "raw_reproduces_archive": abs(raw["auroc"] - cfg["archive_raw_auroc"]) < 0.02,
-        "per_fault_delta": per_fault_delta,
+        "n_seeds": len(per_seed),
+        "raw_auroc_mean": raw_m, "raw_auroc_std": raw_s,
+        "ot_auroc_mean": ot_m, "ot_auroc_std": ot_s,
+        "delta_mean": d_m, "delta_std": d_s,
+        "raw_target_norm_fpr_mean": rawfpr_m, "ot_target_norm_fpr_mean": otfpr_m,
+        "raw_reproduces_archive_s2026": (abs(s2026["raw_auroc"] - cfg["archive_raw_auroc"]) < 0.02) if s2026 else None,
+        "per_seed": per_seed,
+        "per_fault_agg": per_fault_agg,
+        "family_agg": fam_agg,
     }
 
 
@@ -189,40 +243,41 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     batch_size = 256
-    print(f"device={device}", file=sys.stderr)
+    print(f"device={device}  seeds={SEEDS}", file=sys.stderr)
 
     results = {}
     for fold, cfg in FOLDS.items():
         print(f"\n=== {fold} ({cfg['target']}, {cfg['amp']}amp) ===", file=sys.stderr)
         r = process_fold(fold, cfg, device, batch_size)
-        if r is None:
-            continue
-        results[fold] = r
+        if r is not None:
+            results[fold] = r
 
-    out_path = os.path.join(OUT_DIR, "phaseB_raw_vs_ot.json")
+    out_path = os.path.join(OUT_DIR, "phaseB_raw_vs_ot_5seed.json")
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     print(f"\n저장: {out_path}", file=sys.stderr)
 
     # ---- 콘솔 요약 ----
     print("\n" + "=" * 78)
-    print("작업 E-1 Phase B: raw vs raw+OT (023→1, seed2026)")
+    print(f"작업 E-1 Phase B: raw vs raw+OT (023→1, 5-seed {SEEDS})")
     print("=" * 78)
     for fold, r in results.items():
-        raw, ot, oti = r["raw"], r["ot_nominal"], r["ot_inst"]
-        print(f"\n[{fold}] target={r['target']}({r['amp_group']}amp)  "
-              f"archive_raw={r['archive_raw_auroc']:.3f}")
-        print(f"  overall AUROC:  raw={raw['auroc']:.4f}  ot={ot['auroc']:.4f}  "
-              f"Δ={r['delta_auroc_ot_minus_raw']:+.4f}   (ot_inst={oti['auroc']:.4f})")
-        print(f"  raw 재현(아카이브 대조): {'OK' if r['raw_reproduces_archive'] else '불일치!'}"
-              f"  (|Δ|={abs(raw['auroc']-r['archive_raw_auroc']):.4f})")
-        print(f"  target-normal FPR(val95):  raw={raw['target_norm_fpr']:.3f}  ot={ot['target_norm_fpr']:.3f}")
-        print(f"  test window 수:  raw target_norm={raw['n']['target_norm']} fault={raw['n']['fault']}  "
-              f"| ot target_norm={ot['n']['target_norm']} fault={ot['n']['fault']}")
-        print(f"  per-fault AUROC (raw → ot, Δ):")
-        for f in sorted(r["per_fault_delta"], key=lambda k: -abs(r['per_fault_delta'][k]['delta'] if r['per_fault_delta'][k]['delta']==r['per_fault_delta'][k]['delta'] else 0)):
-            d = r["per_fault_delta"][f]
-            print(f"    {f:6s}({d['family']}) n={d['n']}:  {d['raw']:.3f} → {d['ot']:.3f}  Δ={d['delta']:+.3f}")
+        print(f"\n[{fold}] target={r['target']}({r['amp_group']}amp)  n_seeds={r['n_seeds']}  "
+              f"archive_raw(s2026)={r['archive_raw_auroc']:.3f} "
+              f"재현={'OK' if r['raw_reproduces_archive_s2026'] else '확인'}")
+        print(f"  overall AUROC:  raw={r['raw_auroc_mean']:.4f}±{r['raw_auroc_std']:.4f}  "
+              f"ot={r['ot_auroc_mean']:.4f}±{r['ot_auroc_std']:.4f}  "
+              f"Δ={r['delta_mean']:+.4f}±{r['delta_std']:.4f}")
+        print(f"  target-normal FPR(val95) mean:  raw={r['raw_target_norm_fpr_mean']:.3f}  "
+              f"ot={r['ot_target_norm_fpr_mean']:.3f}")
+        print(f"  seed별 Δ:  " + "  ".join(f"s{p['seed']}={p['delta']:+.3f}" for p in r["per_seed"]))
+        print(f"  family(seed평균 raw→ot, Δ):  " +
+              "  ".join(f"{k}:{v['raw_mean']:.2f}→{v['ot_mean']:.2f}({v['delta_mean']:+.2f})"
+                        for k, v in r["family_agg"].items()))
+        print(f"  per-fault(seed평균 raw→ot, Δ):")
+        for f in sorted(r["per_fault_agg"], key=lambda k: -abs(r['per_fault_agg'][k]['delta_mean'])):
+            d = r["per_fault_agg"][f]
+            print(f"    {f:6s}({d['family']}):  {d['raw_mean']:.3f} → {d['ot_mean']:.3f}  Δ={d['delta_mean']:+.3f}")
 
 
 if __name__ == "__main__":

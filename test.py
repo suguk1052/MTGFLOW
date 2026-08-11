@@ -53,6 +53,14 @@ parser.add_argument('--rms_penalty', type=str, default=None, choices=['one-sided
                     help="작업 D: z_rms 페널티 형태. 미지정 시 checkpoint 값으로 복원.")
 parser.add_argument('--rms_eps', type=float, default=None,
                     help='작업 D: per-window RMS eps. 미지정 시 checkpoint 값으로 복원.')
+# 작업 E(order tracking): 학습과 일치해야 함. 미지정 시 checkpoint 값으로 복원.
+#   단, order tracking은 test-time 변환으로도 독립 적용 가능(023→1은 source identity라 학습 무관).
+parser.add_argument('--order_track', action='store_true',
+                    help='작업 E: 각도영역 상수-SPR 리샘플 적용. 미지정 시 checkpoint 값으로 복원.')
+parser.add_argument('--order_track_ref', type=str, default=None, choices=['nominal', 'inst'],
+                    help="작업 E: OT 회전속도 기준. 미지정 시 checkpoint 값으로 복원.")
+parser.add_argument('--order_track_ref_rpm', type=float, default=None,
+                    help='작업 E: SPR 산정 기준 rpm. 미지정 시 checkpoint 값으로 복원.')
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
 parser.add_argument('--sampling_rate', type=float, default=1.0,
@@ -197,6 +205,14 @@ def reconcile_paderborn_args_with_checkpoint(args, checkpoint):
         args.rms_penalty = metadata.get('rms_penalty', 'one-sided')
     if args.rms_eps is None:
         args.rms_eps = float(metadata.get('rms_eps', 1e-8))
+    # 작업 E: order tracking 복원. --order_track를 CLI로 주면 test-time 적용(raw ckpt에도 독립 적용 가능),
+    # 미지정 시 checkpoint 값(구 ckpt는 False). ref/ref_rpm도 CLI 우선, 미지정 시 metadata.
+    if not option_was_provided('--order_track'):
+        args.order_track = bool(metadata.get('order_track', False))
+    if args.order_track_ref is None:
+        args.order_track_ref = metadata.get('order_track_ref', 'nominal')
+    if args.order_track_ref_rpm is None:
+        args.order_track_ref_rpm = metadata.get('order_track_ref_rpm', None)
     # train-normal log-RMS z-score 통계 앵커(로더가 재계산하지만 checkpoint 값으로 검증).
     args.ckpt_train_logrms_mean = metadata.get('train_logrms_mean')
     args.ckpt_train_logrms_std = metadata.get('train_logrms_std')
@@ -298,7 +314,10 @@ def build_loaders(args):
             measured_meta_stats=args.measured_meta_stats,
             amp_normalize=args.amp_normalize,
             amp_normalize_channels=args.amp_normalize_channels if args.amp_normalize_channels is not None else 'all',
-            rms_eps=args.rms_eps if args.rms_eps is not None else 1e-8
+            rms_eps=args.rms_eps if args.rms_eps is not None else 1e-8,
+            order_track=bool(getattr(args, 'order_track', False)),
+            order_track_ref=getattr(args, 'order_track_ref', None) or 'nominal',
+            order_track_ref_rpm=getattr(args, 'order_track_ref_rpm', None),
         )
     else:
         raise ValueError(f'Unsupported dataset name: {args.name}')
@@ -449,6 +468,10 @@ def evaluate_run(run_name, model, test_loader, val_loader, paderborn_mode, refer
                 'rms_lambda': float(args.rms_lambda) if args.rms_lambda is not None else 0.0,
                 'rms_penalty': args.rms_penalty if args.rms_penalty is not None else 'one-sided',
                 'rms_eps': float(args.rms_eps) if args.rms_eps is not None else 1e-8,
+                # 작업 E(order tracking)
+                'order_track': bool(getattr(args, 'order_track', False)),
+                'order_track_ref': getattr(args, 'order_track_ref', None) or 'nominal',
+                'order_track_ref_rpm': getattr(args, 'order_track_ref_rpm', None),
             },
             'model_config': {
                 'model': args.model,

@@ -6,6 +6,8 @@
 import os
 import numpy as np
 import scipy.io
+from scipy import signal as _sps
+from fractions import Fraction
 import re
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -191,6 +193,9 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
                          amp_normalize=False,
                          amp_normalize_channels='all',
                          rms_eps=1e-8,
+                         order_track=False,
+                         order_track_ref='nominal',
+                         order_track_ref_rpm=None,
                          vibration_sampling_rate=64000,
                          op_sampling_rate=4000):
     """
@@ -234,6 +239,40 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
         mode = 'cross-domain'
         train_loads = normalize_id_list(train_loads)
         test_loads = normalize_id_list(test_loads)
+
+    if order_track_ref not in ('nominal', 'inst'):
+        raise ValueError("order_track_ref must be one of ['nominal', 'inst']")
+
+    # 작업 E(order tracking): 균일 상수-SPR 각도영역 리샘플.
+    #   SPR = FS_VIB/(ref_rpm/60), ref_rpm = train 세팅 nominal rpm의 최댓값(기본 1500).
+    #   → source(1500rpm)는 배율 1.0로 identity, target(저속)만 다운샘플되어 window당 회전각이 동일.
+    #   window 길이(2048)는 불변 → 모델 구조 영향 없음. 등속(파일 내 speed 상수)이라 nominal이 primary.
+    if order_track:
+        ref_rpm = (order_track_ref_rpm if order_track_ref_rpm
+                   else max(PADERBORN_SETTING_META[s][0] for s in train_loads))
+        ot_spr = int(round(vibration_sampling_rate / (ref_rpm / 60.0)))
+    else:
+        ref_rpm, ot_spr = None, None
+
+    def _apply_order_track(sig, folder_path, f):
+        """sig(T,C)를 파일 회전속도 기준 상수 SPR로 각도영역 리샘플. order_track=False면 무변경.
+        nominal: 세팅 nominal rpm 사용 / inst: 측정 speed 평균 사용(등속이라 nominal과 동치)."""
+        if not order_track:
+            return sig
+        setting_name = os.path.basename(folder_path)
+        if order_track_ref == 'nominal':
+            rpm = PADERBORN_SETTING_META[setting_name][0]
+        else:
+            ms = load_measured_operational_signals(os.path.join(folder_path, f))
+            rpm = float(np.mean(ms[:, 0]))  # speed 열
+        frot = rpm / 60.0
+        n_in = len(sig)
+        n_out = int(round(n_in * ot_spr * frot / vibration_sampling_rate))
+        frac = Fraction(n_out, n_in).limit_denominator(10000)
+        up, down = max(1, frac.numerator), frac.denominator
+        if up == down:
+            return sig  # 배율 1.0 → 정확한 identity 보장(source sanity)
+        return _sps.resample_poly(sig, up, down, axis=0)
 
     def extract_bearing_id(filename):
         match = re.search(r'(K[A-Z]?\d{2,3})(?:_|\.)', filename)
@@ -288,6 +327,7 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
         key = f.replace('.mat', '')
         sig = load_stacked_signals(mat, key, sensor_names)
         if sig is not None:
+            sig = _apply_order_track(sig, folder_path, f)  # 작업 E: 각도영역 리샘플(scaler도 OT 신호 기준)
             raw_train_signals.append(sig)
 
     if not raw_train_signals:
@@ -314,6 +354,7 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
             sig = load_stacked_signals(mat, key, sensor_names)  # (T, C)
             if sig is None:
                 continue
+            sig = _apply_order_track(sig, folder_path, f)  # 작업 E: 각도영역 리샘플(transform 전)
             scaled_sig = scaler.transform(sig)  # (T, C)
 
             # 파일 단위 경계면을 침범하지 않는 독립 슬라이딩
@@ -449,6 +490,11 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
         norm_target = 'all channels' if amp_normalize_channels == 'all' else 'vibration(ch0) only'
         print(f'Amplitude Normalize: per-window RMS [{norm_target}] '
               f'(ch0 log-RMS train z-score: mean={train_logrms_mean:.4f}, std={train_logrms_std:.4f})')
+
+    if order_track:
+        rev_per_window = window_size / ot_spr
+        print(f'Order Tracking: ref_rpm={ref_rpm} SPR={ot_spr} samples/rev '
+              f'(ref={order_track_ref}), window={window_size} → {rev_per_window:.3f} rev/window')
 
     # 파이토치 데이터로더 패킹 및 반환
     train_ds = Paderborn_dataset(train_x, train_y, window_size, train_ids_per_window, train_meta, train_rms_z)

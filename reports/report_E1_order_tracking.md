@@ -1,6 +1,8 @@
 # 작업 E 1단계 — Order tracking 자체 효과 격리 (023→1 저속 LOSO)
 
-> 상태: **Phase A(무학습 정렬 진단) 완료 · 게이트 PASS.** Phase B(학습 비교)는 GPU 승인 대기.
+> 상태: **완료.** Phase A(무학습 정렬 진단) 게이트 PASS · Phase B(학습 비교) 5-seed 완료.
+> **최종 판정: OT는 전역 해법이 아니라 저진폭 target에서만 보이는 국소 효과.**
+> LONO1(K001 고진폭) 무개선, LONO2(K002 저진폭) 일관 개선(특히 KI 계열).
 > 관련: TODO §E, 계획 `~/.claude/plans/todo-md-swift-church.md`.
 
 ## 목적
@@ -69,9 +71,68 @@ order tracking(각도영역 리샘플 → 회전차수 축 정렬)이 이 shift�
 
 ---
 
-## Phase B — 학습·평가 (GPU 승인 대기)
+## Phase B — 학습·평가 (완료, 5-seed)
 
+### 설계
 - `order_track` 옵션을 loader/main/test에 배관(`amp_normalize`와 동일 패턴, source/target 대칭 규칙,
-  nominal primary). 023→1 **LONO1(K001 고진폭)/LONO2(K002 저진폭)**에서 **seed 2026** 단일로
-  raw vs raw+OT 비교(AUROC primary, 정상 FPR secondary). 효과 확인 시에만 5-seed 확장. compositional 제외.
-- (결과 표·결론은 Phase B 실행 후 이 절에 추가.)
+  nominal primary). 023→1 **LONO1(K001 고진폭)/LONO2(K002 저진폭)**에서 raw vs raw+OT 비교
+  (AUROC primary, 정상 FPR secondary). compositional 제외.
+- 023→1은 source=1500rpm 단일이라 train에서 OT는 identity → **raw 체크포인트 하나가 raw·raw+OT
+  양쪽 모델**. OT는 순수 test-time 변환(target 900rpm window만 각도영역 재표현)이라 동일 checkpoint를
+  order_track off/on 두 loader로 재추론해 비교. nominal(primary) vs instantaneous(sanity)는 seed2026에서
+  동치 확인되어 nominal만 집계.
+- **5-seed**: seed 2024/2025/2026/2027/2028 × {LONO1, LONO2} (seed2026은 기존, 나머지 4개 학습 추가).
+- 평가 스크립트 `analysis/diagnose_E_order_tracking_eval.py`, 결과 `results/Paderborn/E_order_tracking/phaseB_raw_vs_ot_5seed.json`.
+- **재현 검증**: raw arm의 seed2026 overall AUROC가 아카이브 B3(LONO1 0.088 / LONO2 0.581)과 일치(OK).
+
+### 결과 (5-seed 집계, raw → raw+OT)
+
+| fold | target | 진폭군 | raw AUROC | ot AUROC | ΔAUROC | raw FPR(val95) | ot FPR(val95) |
+|---|---|---|---|---|---|---|---|
+| LONO1 | K001 | 고진폭 | 0.161±0.097 | 0.164±0.071 | **+0.003±0.030** | 0.683 | 0.625 |
+| LONO2 | K002 | 저진폭 | 0.678±0.114 | 0.752±0.111 | **+0.073±0.051** | 0.000 | 0.000 |
+
+**seed별 ΔAUROC**
+
+| fold | s2024 | s2025 | s2026 | s2027 | s2028 |
+|---|---|---|---|---|---|
+| LONO1 | +0.006 | −0.010 | +0.048 | −0.044 | +0.013 |
+| LONO2 | +0.076 | +0.135 | +0.115 | +0.053 | −0.012 |
+
+- LONO1: Δ 부호가 seed마다 엇갈림(양수 3 / 음수 2), 평균 +0.003으로 **효과 없음**. 절대 AUROC도
+  raw·ot 모두 0.16(≪0.5, 역전) — 고진폭 K001의 D 진폭 confound로 밀도모델이 이미 역전 상태라
+  OT가 정렬해도 fault를 못 가른다.
+- LONO2: 5개 중 4개 seed에서 양수(+0.05~+0.14), 평균 +0.073 → **일관된 개선**.
+
+**fault family별 (seed평균 raw→ot, Δ)**
+
+| fold | KA | KB | KI |
+|---|---|---|---|
+| LONO1 | 0.15→0.16 (+0.02) | 0.44→0.46 (+0.02) | 0.04→0.02 (−0.02) |
+| LONO2 | 0.68→0.74 (+0.06) | 0.79→0.83 (+0.03) | **0.62→0.73 (+0.11)** |
+
+LONO2의 개선은 **KI(내륜 결함) 계열이 주도**: KI17 0.41→0.56(+0.15), KI18 0.76→0.91(+0.15),
+KI21 0.58→0.72(+0.15), KI16 0.80→0.92(+0.12) 등. KA22(0.33→0.45, +0.13), KA15(0.36→0.45, +0.08)처럼
+그간 미탐이던 저진폭 fault도 소폭 개선.
+
+### 단일-seed(s2026) → 5-seed 결론 변화·보강
+
+Phase B는 원래 seed2026 단일로 먼저 봤고, 그 결과(LONO1 Δ=+0.048, LONO2 Δ=+0.115)만으로는
+**두 fold 모두 OT가 도움**되는 것처럼 보였다. 5-seed로 확장하자 판정이 다음과 같이 갈렸다.
+
+- **LONO1: 단일-seed의 +0.048은 seed 노이즈였다.** 5-seed 평균 +0.003±0.030, seed별 부호 엇갈림
+  (−0.044~+0.048)으로, seed2026이 우연히 상단이었을 뿐 robust한 개선이 아님이 드러남.
+- **LONO2: 단일-seed의 개선은 robust했다.** 5-seed에서도 +0.073±0.051, 4/5 seed 양수로 재현.
+  단일-seed의 +0.115보다 평균은 낮아졌지만(seed2026이 다소 높은 편) 방향·유의성은 유지.
+
+즉 5-seed의 보강점은 **(i) 고진폭 fold의 겉보기 이득을 seed 노이즈로 기각하고, (ii) 저진폭 fold의
+이득이 seed에 robust함을 확립**한 것이다.
+
+### 최종 판정
+
+- **LONO1(K001 고진폭): OT 무개선.** 밀도모델이 진폭 confound로 이미 역전(AUROC 0.16)이라 정렬 이득 없음.
+- **LONO2(K002 저진폭): OT 일관 개선(+0.073±0.051), 특히 KI 계열.** 저속 unseen에서 order-locked
+  fault harmonic 정렬이 저진폭 target에서 실제 AUROC로 전환됨.
+- 따라서 **OT는 전역 해법이 아니라 저진폭 target에서만 나타나는 국소 효과.** Phase A의 기대치 하향
+  ("정상 지배 에너지는 비-order-locked이라 이득 국소적")과 정합. 2단계(OT×RMS-norm 2×2)는
+  전역 효과가 아님이 확정됐으므로 **현 시점 보류**(저진폭 target 한정으로만 의미).

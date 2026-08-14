@@ -41,8 +41,9 @@ for train in "$@"; do
   inner="source $CONDA_SH && conda activate mtgflow && cd $ROOT && bash '$train' && bash '$test_rel'"
   wrap="singularity exec --nv $SIF bash -lc \"$inner\""
 
+  # PARALLEL=1이면 afterok 체인을 생략해 각 잡을 독립 제출(병렬). 기본은 직렬 체인(하위호환).
   dep=()
-  [[ -n "$prev_jid" ]] && dep=(--dependency=afterok:"$prev_jid")
+  [[ "${PARALLEL:-0}" != "1" && -n "$prev_jid" ]] && dep=(--dependency=afterok:"$prev_jid")
 
   cmd=(sbatch "${SLURM_RES[@]}" "${dep[@]}" -J "$job_name" -o "$LOGDIR/%x_%j.out" --wrap "$wrap")
 

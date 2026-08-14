@@ -54,6 +54,13 @@ parser.add_argument('--rms_penalty', type=str, default='one-sided', choices=['on
                     help="작업 D: z_rms 페널티 형태. 'one-sided'=max(0,z_rms)²(고진폭만), 'two-sided'=z_rms².")
 parser.add_argument('--rms_eps', type=float, default=1e-8,
                     help='작업 D: per-window RMS 정규화/로그의 0-분산 방어 eps.')
+# 작업 E(order tracking): 각도영역 상수-SPR 리샘플. 저속 unseen 세팅을 학습 각도 스케일로 정렬.
+parser.add_argument('--order_track', action='store_true',
+                    help='작업 E: 파일 vibration을 상수 SPR로 각도영역 리샘플(window당 회전각 정렬). 저속 fold 전용.')
+parser.add_argument('--order_track_ref', type=str, default='nominal', choices=['nominal', 'inst'],
+                    help="작업 E: OT 회전속도 기준. 'nominal'=세팅 nominal rpm(primary), 'inst'=측정 speed 평균(sanity).")
+parser.add_argument('--order_track_ref_rpm', type=float, default=None,
+                    help='작업 E: SPR 산정용 기준 rpm. 미지정 시 train 세팅 nominal rpm 최댓값(023→1이면 1500).')
 parser.add_argument('--train_split', type=float, default=0.6)
 parser.add_argument('--stride_size', type=int, default=10)
 parser.add_argument('--sampling_rate', type=float, default=1.0,
@@ -150,6 +157,10 @@ def build_paderborn_metadata(args):
         'rms_penalty': args.rms_penalty,
         'rms_eps': float(args.rms_eps),
         'rms_feature': 'log_rms',
+        # 작업 E(order tracking)
+        'order_track': bool(args.order_track),
+        'order_track_ref': str(args.order_track_ref),
+        'order_track_ref_rpm': (None if args.order_track_ref_rpm is None else float(args.order_track_ref_rpm)),
         'train_logrms_mean': float(getattr(args, 'train_logrms_mean', 0.0)),
         'train_logrms_std': float(getattr(args, 'train_logrms_std', 1.0)),
     }
@@ -231,7 +242,10 @@ for seed in args.seeds:
             measured_meta_stats=args.measured_meta_stats,
             amp_normalize=args.amp_normalize,
             amp_normalize_channels=args.amp_normalize_channels,
-            rms_eps=args.rms_eps
+            rms_eps=args.rms_eps,
+            order_track=args.order_track,
+            order_track_ref=args.order_track_ref,
+            order_track_ref_rpm=args.order_track_ref_rpm,
         )
         # 작업 D: 진폭 정규화 시 train-normal log-RMS 통계를 checkpoint metadata에 앵커로 저장
         # (test 재구성이 동일 통계를 쓰는지 검증용). 로더가 dataset 속성으로 노출.

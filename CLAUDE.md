@@ -195,21 +195,29 @@ cross-domain 실험에서 정보가 섞임(누수).
 - **로그인 노드(piai-cluster)엔 GPU가 없다.** GPU 학습은 반드시 아래 래퍼로 잡을 제출한다.
   Claude는 대화형 셸(`srun --pty` + `singularity shell`)을 유지 못 하므로,
   `singularity exec --nv ... bash -lc '...'` 비대화형으로 접어 실행한다.
-- **노드는 허락된 것만.** 기본은 **n17 V100-16 1장** (`--partition=V100-16
-  --gres=gpu:V100-16:1 --nodelist=n17 --cpus-per-task=10`). 다른 노드는 사용자 허락 없이 쓰지 않는다.
+- **노드는 n17·n16만 허용(둘 다 V100-16, 각 GPU 3장).** 그 외 노드는 사용자 허락 없이 쓰지 않는다.
+  기본 리소스는 GPU 1장 (`--partition=V100-16 --gres=gpu:V100-16:1 --nodelist=n17 --cpus-per-task=10`);
+  `NODELIST=n16`으로 n16 지정.
+- **실험을 2개 이상 돌릴 때는 시간 아끼게 병렬로.** 각 실험이 GPU 1장만 잡으므로 한 노드(3 GPU)에 최대
+  3개까지 동시 실행 가능 — 1 노드 1 실험으로 직렬화하지 말 것. 여러 실험은
+  `PARALLEL=1 bash runners/slurm_run.sh <a.sh> <b.sh> ...`로 afterok 체인 없이 독립 제출(병렬),
+  n17 3장이 차면 n16으로 넘긴다. (실험이 1개뿐이면 그냥 1장으로 돌리면 되고, 직렬 의존이 필요할 때만
+  PARALLEL 생략해 체인.)
 
 **재사용 래퍼:** `runners/slurm_run.sh`
-- 사용법(경로는 MTGFLOW 기준 상대, **여러 개 나열하면 순차 체인**):
+- 사용법(경로는 MTGFLOW 기준 상대, **기본은 여러 개 나열 시 순차 체인, `PARALLEL=1`이면 병렬**):
   ```bash
-  bash runners/slurm_run.sh <train1.sh> [<train2.sh> ...]
+  bash runners/slurm_run.sh <train1.sh> [<train2.sh> ...]            # afterok 직렬 체인
+  PARALLEL=1 bash runners/slurm_run.sh <train1.sh> <train2.sh> ...   # 독립 제출(병렬, 노드당 3개까지)
+  NODELIST=n16 PARALLEL=1 bash runners/slurm_run.sh ...              # n16에서 병렬
   DRY_RUN=1 bash runners/slurm_run.sh ...   # 제출 없이 나갈 sbatch 명령만 출력(미리보기)
   ```
 - 동작:
   - 각 "학습 스크립트"에 대해 짝 test 스크립트를 파일명 규칙으로 자동 매칭
     (`_5seeds.sh` → `_test_5seeds.sh`).
   - 실험 하나 = **`학습(main.py) && test(test.py)` 한 잡** — 학습 성공해야 test 실행.
-  - 실험들 사이 = **`--dependency=afterok` 체인** — 앞 잡이 exit 0이어야 다음 시작,
-    중간 실패 시 뒤는 자동 취소.
+  - 실험들 사이 = 기본 **`--dependency=afterok` 체인** — 앞 잡이 exit 0이어야 다음 시작,
+    중간 실패 시 뒤는 자동 취소. **`PARALLEL=1`이면 체인을 생략**해 각 잡을 독립 제출(동시 실행).
   - 잡 안에서 `conda activate mtgflow` 후 실행 → 실험 `.sh`의 bare `python3`가 mtgflow env로 해석.
   - 로그: `runners/slurm_logs/<jobname>_<jobid>.out` (gitignore됨).
 

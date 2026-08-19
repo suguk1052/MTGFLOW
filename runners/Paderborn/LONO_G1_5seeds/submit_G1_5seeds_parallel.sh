@@ -33,9 +33,10 @@ for split in "${SPLITS[@]}"; do
     [[ -f "$ROOT/$train"    ]] || { echo "학습 스크립트 없음: $ROOT/$train" >&2; exit 1; }
     [[ -f "$ROOT/$test_rel" ]] || { echo "test 스크립트 없음: $ROOT/$test_rel" >&2; exit 1; }
 
-    # 5 seed 전체 완료(summary_seeds.json) 시 스킵
-    if [[ -f "$RESULTS/${run_name}/summary_seeds.json" ]]; then
-      echo "[skip] $run_name (summary_seeds.json 이미 존재)"
+    # 추가 4 seed(2024/2025/2027/2028) 중 마지막(2028) metrics 존재 시 스킵.
+    # (base 폴더 summary_seeds.json은 s2026 단일-seed 게이트가 남긴 것이라 스킵 기준으로 부적합.)
+    if [[ -f "$RESULTS/${run_name}_s2028/paderborn_per_bearing_metrics.json" ]]; then
+      echo "[skip] $run_name (s2028 metrics 이미 존재)"
       skipped=$((skipped+1))
       continue
     fi

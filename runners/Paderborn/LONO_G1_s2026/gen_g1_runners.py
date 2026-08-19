@@ -52,9 +52,11 @@ def main():
         seeds_line = "    --seeds 2026 \\\n"
         comment2 = "실제는 seed 2026 단일(sanity/gate)."
     elif seedmode == '5seeds':
+        # seed 2026은 LONO_G1_s2026 게이트에서 이미 실행됨 → 재사용. 여기선 나머지 4 seed만 추가 실행.
+        # 최종 5-seed 집계는 diagnose(각 seed) + report_G1_5seeds가 2026 포함 5개를 함께 읽는다.
         out_dir = os.path.join(RUNNERS, "LONO_G1_5seeds")
-        seeds_line = "    --seeds 2024 2025 2026 2027 2028 \\\n"
-        comment2 = "실제 5-seed(2024–2028)."
+        seeds_line = "    --seeds 2024 2025 2027 2028 \\\n"
+        comment2 = "2026 재사용, 나머지 4 seed(2024/2025/2027/2028) 추가 실행 → 최종 5-seed."
     else:
         raise SystemExit(f"알 수 없는 seedmode: {seedmode} (s2026|5seeds)")
     os.makedirs(out_dir, exist_ok=True)

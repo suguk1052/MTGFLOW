@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # 작업 G-1: dual-branch shape/amplitude disentangle. 파일명 _5seeds는 slurm_run.sh
-# 짝 매칭(_5seeds->_test_5seeds) 규약을 위한 토큰. 실제 5-seed(2024–2028).
+# 짝 매칭(_5seeds->_test_5seeds) 규약을 위한 토큰. 2026 재사용, 나머지 4 seed(2024/2025/2027/2028) 추가 실행 → 최종 5-seed.
 # ==============================================================================
 
 RUN_NAME="g1_123to0_LONO4"
@@ -19,6 +19,6 @@ CUDA_VISIBLE_DEVICES=0 python3 main.py \
     --train_ids K001 K002 K003 K006 \
     --val_ids K005 \
     --test_norm_ids K004 \
-    --seeds 2024 2025 2026 2027 2028 \
+    --seeds 2024 2025 2027 2028 \
     --amp_normalize \
     --amp_branch

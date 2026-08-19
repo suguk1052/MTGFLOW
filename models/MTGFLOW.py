@@ -128,13 +128,25 @@ class ScaleDotProductAttention(nn.Module):
 
 class MTGFLOW(nn.Module):
 
-    def __init__ (self, n_blocks, input_size, hidden_size, n_hidden, window_size, n_sensor, dropout = 0.1, model="MAF", batch_norm=True, use_meta=False, meta_input_dim=3, meta_emb_dim=8, meta_inject='concat'):
+    def __init__ (self, n_blocks, input_size, hidden_size, n_hidden, window_size, n_sensor, dropout = 0.1, model="MAF", batch_norm=True, use_meta=False, meta_input_dim=3, meta_emb_dim=8, meta_inject='concat', amp_branch=False, amp_branch_hidden=32):
         super(MTGFLOW, self).__init__()
 
         self.rnn = nn.LSTM(input_size=input_size,hidden_size=hidden_size,batch_first=True, dropout=dropout)
         self.gcn = GNN(input_size=hidden_size, hidden_size=hidden_size)
         self.use_meta = use_meta
         self.meta_emb_dim = meta_emb_dim
+        # 작업 G-1: dual-branch disentangle. shape branch(기존 flow NLL)와 별개로,
+        # shape 정보만으로 만든 h_shape로 조건부 진폭 p(a|h_shape)=N(μ,σ²)를 학습하는 amplitude head.
+        # amp_head 출력 = (μ, logσ). shape encoder(rnn/gcn)와 gradient를 공유(Joint 학습).
+        self.amp_branch = amp_branch
+        if self.amp_branch:
+            self.amp_head = nn.Sequential(
+                nn.Linear(hidden_size, amp_branch_hidden),
+                nn.ReLU(),
+                nn.Linear(amp_branch_hidden, 2),
+            )
+        else:
+            self.amp_head = None
         # meta 주입 방식: 'concat'(기존, condition C에 C_op를 이어붙임) 또는
         #               'film'(C_op로 C를 곱·덧셈 변조; MAF 입력 차원은 no-meta와 동일).
         self.meta_inject = meta_inject if use_meta else 'concat'
@@ -213,6 +225,39 @@ class MTGFLOW(nn.Module):
         log_prob = log_prob.mean(dim=1)
 
         return log_prob
+
+    def forward_disentangle(self, x, meta, a):
+        # 작업 G-1: shape branch(log_prob)와 amplitude branch(p(a|h_shape))를 한 번의 encode로 계산.
+        # 반환: (shape_logprob[N], amp_logprob[N]) — 둘 다 값이 클수록 정상(로그우도).
+        # x: N X K X L X D, a: N X 1 (window별 z-scored log-RMS = batch[4])
+        if self.amp_head is None:
+            raise ValueError("forward_disentangle requires amp_branch=True.")
+        full_shape = x.shape
+        graph, _ = self.attention(x)
+        self.graph = graph
+        x = x.reshape((x.shape[0] * x.shape[1], x.shape[2], x.shape[3]))
+        h, _ = self.rnn(x)
+        h = h.reshape((full_shape[0], full_shape[1], h.shape[1], h.shape[2]))
+        h = self.gcn(h, graph)  # N X K X L X H
+
+        # amplitude branch: 진폭 정보가 차단된 h(shape encoder 출력)를 (K,L)로 pooling → h_shape.
+        # h_shape로 조건부 진폭 정상분포 N(μ, σ²)를 예측. Gaussian NLL(대칭) 사용.
+        h_shape = h.mean(dim=(1, 2))                      # N X H
+        amp_params = self.amp_head(h_shape)               # N X 2
+        mu, log_sigma = amp_params[:, 0:1], amp_params[:, 1:2]
+        log_sigma = torch.clamp(log_sigma, min=-7.0, max=7.0)
+        a = a.to(device=mu.device, dtype=mu.dtype).reshape(-1, 1)
+        amp_logprob = (-0.5 * ((a - mu) / torch.exp(log_sigma)) ** 2
+                       - log_sigma - 0.5 * math.log(2 * math.pi))
+        amp_logprob = amp_logprob.reshape(full_shape[0])  # N
+
+        # shape branch: 기존 test()와 동일한 flow log_prob.
+        h = self._append_meta_condition(h, meta, full_shape)
+        x = x.reshape((-1, full_shape[3]))
+        shape_logprob = self.nf.log_prob(x, full_shape[1], full_shape[2], h).reshape([full_shape[0], -1])
+        shape_logprob = shape_logprob.mean(dim=1)         # N
+
+        return shape_logprob, amp_logprob
 
     def get_graph(self):
         return self.graph

@@ -53,6 +53,11 @@ parser.add_argument('--rms_penalty', type=str, default=None, choices=['one-sided
                     help="작업 D: z_rms 페널티 형태. 미지정 시 checkpoint 값으로 복원.")
 parser.add_argument('--rms_eps', type=float, default=None,
                     help='작업 D: per-window RMS eps. 미지정 시 checkpoint 값으로 복원.')
+# 작업 G-1(dual-branch disentangle): 학습 checkpoint와 일치해야 함. 미지정 시 checkpoint 값 복원.
+parser.add_argument('--amp_branch', action='store_true',
+                    help='작업 G-1: amplitude branch 채점(S_shape/S_amp/S_total 분리). 미지정 시 checkpoint 값으로 복원.')
+parser.add_argument('--amp_branch_hidden', type=int, default=None,
+                    help='작업 G-1: amplitude head hidden 차원. 미지정 시 checkpoint 값으로 복원.')
 # 작업 E(order tracking): 학습과 일치해야 함. 미지정 시 checkpoint 값으로 복원.
 #   단, order tracking은 test-time 변환으로도 독립 적용 가능(023→1은 source identity라 학습 무관).
 parser.add_argument('--order_track', action='store_true',
@@ -154,6 +159,9 @@ def build_paderborn_metadata(args):
         'rms_penalty': args.rms_penalty if args.rms_penalty is not None else 'one-sided',
         'rms_eps': float(args.rms_eps) if args.rms_eps is not None else 1e-8,
         'rms_feature': 'log_rms',
+        # 작업 G-1(dual-branch disentangle)
+        'amp_branch': bool(getattr(args, 'amp_branch', False)),
+        'amp_branch_hidden': int(args.amp_branch_hidden) if getattr(args, 'amp_branch_hidden', None) is not None else 32,
         'train_logrms_mean': float(getattr(args, 'train_logrms_mean', 0.0)),
         'train_logrms_std': float(getattr(args, 'train_logrms_std', 1.0)),
     }
@@ -205,6 +213,11 @@ def reconcile_paderborn_args_with_checkpoint(args, checkpoint):
         args.rms_penalty = metadata.get('rms_penalty', 'one-sided')
     if args.rms_eps is None:
         args.rms_eps = float(metadata.get('rms_eps', 1e-8))
+    # 작업 G-1: amp_branch 복원. 구 checkpoint(키 없음)는 False로 하위호환.
+    if not option_was_provided('--amp_branch'):
+        args.amp_branch = bool(metadata.get('amp_branch', False))
+    if args.amp_branch_hidden is None:
+        args.amp_branch_hidden = int(metadata.get('amp_branch_hidden', 32))
     # 작업 E: order tracking 복원. --order_track를 CLI로 주면 test-time 적용(raw ckpt에도 독립 적용 가능),
     # 미지정 시 checkpoint 값(구 ckpt는 False). ref/ref_rpm도 CLI 우선, 미지정 시 metadata.
     if not option_was_provided('--order_track'):
@@ -364,6 +377,42 @@ def compute_scores(loader, model, measure_speed=False):
         return scores, compute_realtime_stats(num_windows, model_only_sec, end_to_end_sec, args)
     return scores
 
+
+def compute_branch_scores(loader, model, measure_speed=False):
+    """작업 G-1: per-window S_shape(=-shape_logprob), S_amp(=-amp_logprob)를 분리 반환.
+    S_total 합성(표준화)은 evaluate_run에서 val-normal 통계로 수행한다(label-free)."""
+    s_shape_all, s_amp_all = [], []
+    num_windows = 0
+    model_only_sec = 0.0
+
+    synchronize_if_cuda()
+    end_to_end_start = time.perf_counter()
+    with torch.no_grad():
+        for batch in loader:
+            x = batch[0].to(device)
+            meta = batch[3].to(device) if args.use_meta and len(batch) > 3 else None
+            a = batch[4].to(device)
+            batch_size = x.shape[0]
+
+            synchronize_if_cuda()
+            model_start = time.perf_counter()
+            shape_lp, amp_lp = model.forward_disentangle(x, meta, a)
+            synchronize_if_cuda()
+            model_only_sec += time.perf_counter() - model_start
+
+            s_shape_all.append((-shape_lp).cpu().numpy())
+            s_amp_all.append((-amp_lp).cpu().numpy())
+            num_windows += batch_size
+    synchronize_if_cuda()
+    end_to_end_sec = time.perf_counter() - end_to_end_start
+
+    s_shape = np.concatenate(s_shape_all)
+    s_amp = np.concatenate(s_amp_all)
+    if measure_speed:
+        return (s_shape, s_amp), compute_realtime_stats(num_windows, model_only_sec, end_to_end_sec, args)
+    return s_shape, s_amp
+
+
 def warn_if_metadata_mismatch(checkpoint, reference_metadata):
     """시드별 checkpoint의 핵심 metadata가 기준(첫 시드)과 다르면 경고. 데이터/모델 구성 불일치 방지."""
     if not reference_metadata:
@@ -374,7 +423,7 @@ def warn_if_metadata_mismatch(checkpoint, reference_metadata):
     for key in ('load_setting', 'train_load_setting', 'test_load_setting', 'sensor_mode',
                 'train_ids', 'val_ids', 'test_norm_ids', 'window_size', 'stride_size',
                 'use_meta', 'meta_source', 'measured_meta_stats', 'meta_input_dim', 'meta_emb_dim', 'meta_inject',
-                'amp_normalize', 'amp_normalize_channels', 'rms_penalty', 'rms_eps'):
+                'amp_normalize', 'amp_normalize_channels', 'rms_penalty', 'rms_eps', 'amp_branch'):
         if metadata.get(key) != reference_metadata.get(key):
             print(f"⚠️ Warning: seed checkpoint {key}={metadata.get(key)} differs from "
                   f"reference {key}={reference_metadata.get(key)}. 결과가 시드 간 비교 불가능할 수 있음.")
@@ -391,9 +440,33 @@ def evaluate_run(run_name, model, test_loader, val_loader, paderborn_mode, refer
     model.load_state_dict(checkpoint['model'])
     model.eval()
 
-    loss_test, inference_speed = compute_scores(test_loader, model, measure_speed=True)
     test_labels = np.asarray(test_loader.dataset.label, dtype=int)
-    roc_test = roc_auc_score(test_labels, loss_test)
+    branch_aurocs = None
+    precomputed_val_scores = None
+    if getattr(args, 'amp_branch', False):
+        # 작업 G-1: S_shape/S_amp 분리 → val-normal 표준화 등가중 합으로 S_total(label-free).
+        (s_shape_test, s_amp_test), inference_speed = compute_branch_scores(test_loader, model, measure_speed=True)
+        s_shape_val, s_amp_val = compute_branch_scores(val_loader, model)
+        mu_s, sd_s = float(s_shape_val.mean()), float(s_shape_val.std() + 1e-8)
+        mu_a, sd_a = float(s_amp_val.mean()), float(s_amp_val.std() + 1e-8)
+        s_total_std_test = (s_shape_test - mu_s) / sd_s + (s_amp_test - mu_a) / sd_a
+        precomputed_val_scores = (s_shape_val - mu_s) / sd_s + (s_amp_val - mu_a) / sd_a
+        s_total_raw_test = s_shape_test + s_amp_test
+        loss_test = s_total_std_test                       # primary score = S_total(표준화)
+        roc_test = roc_auc_score(test_labels, loss_test)
+        branch_aurocs = {
+            'overall_auroc_shape': float(roc_auc_score(test_labels, s_shape_test)),
+            'overall_auroc_amp': float(roc_auc_score(test_labels, s_amp_test)),
+            'overall_auroc_total_std': float(roc_test),
+            'overall_auroc_total_raw': float(roc_auc_score(test_labels, s_total_raw_test)),
+            'val_norm_stats': {'mu_shape': mu_s, 'sd_shape': sd_s, 'mu_amp': mu_a, 'sd_amp': sd_a},
+        }
+        print("[G-1] AUROC shape={:.4f} amp={:.4f} total_std={:.4f} total_raw={:.4f}".format(
+            branch_aurocs['overall_auroc_shape'], branch_aurocs['overall_auroc_amp'],
+            branch_aurocs['overall_auroc_total_std'], branch_aurocs['overall_auroc_total_raw']))
+    else:
+        loss_test, inference_speed = compute_scores(test_loader, model, measure_speed=True)
+        roc_test = roc_auc_score(test_labels, loss_test)
     print("The ROC score on {} dataset is {}".format(args.name, roc_test))
     print(
         "Test inference speed on {} dataset: "
@@ -418,9 +491,11 @@ def evaluate_run(run_name, model, test_loader, val_loader, paderborn_mode, refer
         'total_windows': int(len(loss_test)),
         'inference_speed': inference_speed,
     }
+    if branch_aurocs is not None:
+        metrics.update(branch_aurocs)
 
     if args.name.lower() == 'paderborn':
-        val_scores = compute_scores(val_loader, model)
+        val_scores = precomputed_val_scores if precomputed_val_scores is not None else compute_scores(val_loader, model)
         threshold = float(np.percentile(val_scores, args.threshold_percentile))
         predictions = (loss_test >= threshold).astype(int)
         overall_accuracy = float(np.mean(predictions == test_labels))
@@ -468,6 +543,9 @@ def evaluate_run(run_name, model, test_loader, val_loader, paderborn_mode, refer
                 'rms_lambda': float(args.rms_lambda) if args.rms_lambda is not None else 0.0,
                 'rms_penalty': args.rms_penalty if args.rms_penalty is not None else 'one-sided',
                 'rms_eps': float(args.rms_eps) if args.rms_eps is not None else 1e-8,
+                # 작업 G-1(dual-branch disentangle)
+                'amp_branch': bool(getattr(args, 'amp_branch', False)),
+                'amp_branch_hidden': int(args.amp_branch_hidden) if getattr(args, 'amp_branch_hidden', None) is not None else 32,
                 # 작업 E(order tracking)
                 'order_track': bool(getattr(args, 'order_track', False)),
                 'order_track_ref': getattr(args, 'order_track_ref', None) or 'nominal',
@@ -563,7 +641,7 @@ if args.name.lower() == 'paderborn' and getattr(args, 'amp_normalize', False):
         print(f"⚠️ Warning: recomputed train_logrms_mean={recomputed_mean:.6f} differs from "
               f"checkpoint anchor={float(ckpt_mean):.6f}. 진폭 z-score 통계 불일치 — split 구성 확인 필요.")
 
-model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject)
+model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject, amp_branch=bool(getattr(args, 'amp_branch', False)), amp_branch_hidden=int(args.amp_branch_hidden) if getattr(args, 'amp_branch_hidden', None) is not None else 32)
 model = model.to(device)
 
 per_seed = []

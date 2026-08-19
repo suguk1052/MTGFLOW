@@ -54,6 +54,12 @@ parser.add_argument('--rms_penalty', type=str, default='one-sided', choices=['on
                     help="작업 D: z_rms 페널티 형태. 'one-sided'=max(0,z_rms)²(고진폭만), 'two-sided'=z_rms².")
 parser.add_argument('--rms_eps', type=float, default=1e-8,
                     help='작업 D: per-window RMS 정규화/로그의 0-분산 방어 eps.')
+# 작업 G-1(dual-branch disentangle): shape encoder(h_shape)로 조건부 진폭 p(a|h_shape)=N(μ,σ²)를 학습.
+# amp_normalize(shape-only window)와 함께 써야 하며, a=batch[4](z-scored log-RMS)를 target으로 씀.
+parser.add_argument('--amp_branch', action='store_true',
+                    help='작업 G-1: amplitude branch(조건부 진폭 head) 추가. 학습 loss = shape_NLL + amp_NLL(Joint). --amp_normalize 필수.')
+parser.add_argument('--amp_branch_hidden', type=int, default=32,
+                    help='작업 G-1: amplitude head MLP hidden 차원.')
 # 작업 E(order tracking): 각도영역 상수-SPR 리샘플. 저속 unseen 세팅을 학습 각도 스케일로 정렬.
 parser.add_argument('--order_track', action='store_true',
                     help='작업 E: 파일 vibration을 상수 SPR로 각도영역 리샘플(window당 회전각 정렬). 저속 fold 전용.')
@@ -157,6 +163,9 @@ def build_paderborn_metadata(args):
         'rms_penalty': args.rms_penalty,
         'rms_eps': float(args.rms_eps),
         'rms_feature': 'log_rms',
+        # 작업 G-1(dual-branch disentangle)
+        'amp_branch': bool(getattr(args, 'amp_branch', False)),
+        'amp_branch_hidden': int(getattr(args, 'amp_branch_hidden', 32)),
         # 작업 E(order tracking)
         'order_track': bool(args.order_track),
         'order_track_ref': str(args.order_track_ref),
@@ -253,7 +262,11 @@ for seed in args.seeds:
         args.train_logrms_std = float(getattr(train_loader.dataset, 'train_logrms_std', 1.0))
 
     # %%
-    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject)
+    # 작업 G-1: amp_branch는 shape-only window(amp_normalize)를 전제로 함(진폭 정보 차단).
+    if getattr(args, 'amp_branch', False) and not args.amp_normalize:
+        raise ValueError('--amp_branch requires --amp_normalize (shape-only window). '
+                         'shape 정보만으로 h_shape를 만들어 p(a|h_shape)를 학습하는 구조이므로 진폭 정규화가 필수.')
+    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject, amp_branch=getattr(args, 'amp_branch', False), amp_branch_hidden=args.amp_branch_hidden)
     model = model.to(device)
 
     # %%
@@ -292,7 +305,13 @@ for seed in args.seeds:
             meta = batch[3].to(device) if args.use_meta and len(batch) > 3 else None
 
             optimizer.zero_grad()
-            loss = -model(x, meta)
+            if getattr(args, 'amp_branch', False):
+                # 작업 G-1(Joint): loss = shape_NLL + amp_NLL. 둘 다 정식 로그우도라 등가중 합 = joint NLL.
+                a = batch[4].to(device)
+                shape_lp, amp_lp = model.forward_disentangle(x, meta, a)
+                loss = -(shape_lp.mean() + amp_lp.mean())
+            else:
+                loss = -model(x, meta)
 
             total_loss = loss
 
@@ -310,7 +329,13 @@ for seed in args.seeds:
                 for batch in val_loader:
                     x = batch[0].to(device)
                     meta = batch[3].to(device) if args.use_meta and len(batch) > 3 else None
-                    loss = -model.test(x, meta).cpu().numpy()
+                    if getattr(args, 'amp_branch', False):
+                        # checkpoint 선택 기준을 학습 목적과 동일한 joint NLL로 유지.
+                        a = batch[4].to(device)
+                        shape_lp, amp_lp = model.forward_disentangle(x, meta, a)
+                        loss = -(shape_lp + amp_lp).cpu().numpy()
+                    else:
+                        loss = -model.test(x, meta).cpu().numpy()
                     loss_val.append(loss)
             loss_val = np.concatenate(loss_val)
             mean_val_loss = np.mean(loss_val)

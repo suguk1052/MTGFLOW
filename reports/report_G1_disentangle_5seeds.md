@@ -71,5 +71,6 @@ seed [2024, 2025, 2026, 2027, 2028] (5 seed) mean±std. 무학습 재추론 seed
 **한계·후속(이번 범위 밖 — G-1만 격리, 다른 아이디어 미혼합 유지):**
 - S_amp 검출력 강화(예: shape branch에 NLL 외 latent 거리 병행 — F-0 근거) 또는 fusion 재설계(val 기반, test 라벨 무튜닝).
 - S_shape의 seed 분산(±0.069~0.12)이 커 안정화 필요.
-- 판정 근거 데이터: `results/Paderborn/diag_G1_disentangle/aggregate_s<seed>.json`(5개) + `summary_5seeds.json`. 1-seed 상세는 `report_G1_disentangle.md`.
+- 판정 근거 데이터: `results/Paderborn/diag_G1_disentangle/aggregate_s<seed>.json`(5 seed) + `summary_5seeds.json` +
+  fold별 `<split>_LONO<n>_s<seed>.json`. (1-seed·smoke 리포트는 이 파일로 통합·삭제됨.)
 

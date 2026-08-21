@@ -58,6 +58,9 @@ parser.add_argument('--amp_branch', action='store_true',
                     help='작업 G-1: amplitude branch 채점(S_shape/S_amp/S_total 분리). 미지정 시 checkpoint 값으로 복원.')
 parser.add_argument('--amp_branch_hidden', type=int, default=None,
                     help='작업 G-1: amplitude head hidden 차원. 미지정 시 checkpoint 값으로 복원.')
+# 작업 G-3a(band amplitude): 학습 checkpoint와 일치해야 함. 미지정 시 checkpoint 값 복원.
+parser.add_argument('--amp_n_bands', type=int, default=None,
+                    help='작업 G-3a: amplitude target band 수. 미지정 시 checkpoint 값으로 복원.')
 # 작업 E(order tracking): 학습과 일치해야 함. 미지정 시 checkpoint 값으로 복원.
 #   단, order tracking은 test-time 변환으로도 독립 적용 가능(023→1은 source identity라 학습 무관).
 parser.add_argument('--order_track', action='store_true',
@@ -162,6 +165,8 @@ def build_paderborn_metadata(args):
         # 작업 G-1(dual-branch disentangle)
         'amp_branch': bool(getattr(args, 'amp_branch', False)),
         'amp_branch_hidden': int(args.amp_branch_hidden) if getattr(args, 'amp_branch_hidden', None) is not None else 32,
+        # 작업 G-3a(band amplitude)
+        'amp_n_bands': int(getattr(args, 'amp_n_bands', 1) or 1),
         'train_logrms_mean': float(getattr(args, 'train_logrms_mean', 0.0)),
         'train_logrms_std': float(getattr(args, 'train_logrms_std', 1.0)),
     }
@@ -218,6 +223,9 @@ def reconcile_paderborn_args_with_checkpoint(args, checkpoint):
         args.amp_branch = bool(metadata.get('amp_branch', False))
     if args.amp_branch_hidden is None:
         args.amp_branch_hidden = int(metadata.get('amp_branch_hidden', 32))
+    # 작업 G-3a: band 수 복원. 구 checkpoint(키 없음)는 1(=G-1 스칼라)로 하위호환.
+    if args.amp_n_bands is None:
+        args.amp_n_bands = int(metadata.get('amp_n_bands', 1))
     # 작업 E: order tracking 복원. --order_track를 CLI로 주면 test-time 적용(raw ckpt에도 독립 적용 가능),
     # 미지정 시 checkpoint 값(구 ckpt는 False). ref/ref_rpm도 CLI 우선, 미지정 시 metadata.
     if not option_was_provided('--order_track'):
@@ -327,6 +335,7 @@ def build_loaders(args):
             measured_meta_stats=args.measured_meta_stats,
             amp_normalize=args.amp_normalize,
             amp_normalize_channels=args.amp_normalize_channels if args.amp_normalize_channels is not None else 'all',
+            amp_n_bands=int(getattr(args, 'amp_n_bands', 1) or 1),
             rms_eps=args.rms_eps if args.rms_eps is not None else 1e-8,
             order_track=bool(getattr(args, 'order_track', False)),
             order_track_ref=getattr(args, 'order_track_ref', None) or 'nominal',
@@ -423,7 +432,7 @@ def warn_if_metadata_mismatch(checkpoint, reference_metadata):
     for key in ('load_setting', 'train_load_setting', 'test_load_setting', 'sensor_mode',
                 'train_ids', 'val_ids', 'test_norm_ids', 'window_size', 'stride_size',
                 'use_meta', 'meta_source', 'measured_meta_stats', 'meta_input_dim', 'meta_emb_dim', 'meta_inject',
-                'amp_normalize', 'amp_normalize_channels', 'rms_penalty', 'rms_eps', 'amp_branch'):
+                'amp_normalize', 'amp_normalize_channels', 'rms_penalty', 'rms_eps', 'amp_branch', 'amp_n_bands'):
         if metadata.get(key) != reference_metadata.get(key):
             print(f"⚠️ Warning: seed checkpoint {key}={metadata.get(key)} differs from "
                   f"reference {key}={reference_metadata.get(key)}. 결과가 시드 간 비교 불가능할 수 있음.")
@@ -635,13 +644,18 @@ train_loader, val_loader, test_loader, n_sensor = build_loaders(args)
 # 작업 D: 로더가 재계산한 train-normal log-RMS z-score 통계가 checkpoint 앵커와 일치하는지 검증
 # (동일 train 데이터면 결정적으로 동일해야 함 — 불일치 시 데이터/split 구성 오류 신호).
 if args.name.lower() == 'paderborn' and getattr(args, 'amp_normalize', False):
-    recomputed_mean = float(getattr(train_loader.dataset, 'train_logrms_mean', 0.0))
+    # 작업 G-3a: band 모드면 통계가 길이 K 벡터라 원소별로 비교(스칼라는 길이 1 벡터로 취급).
+    recomputed_mean = np.atleast_1d(np.asarray(
+        getattr(train_loader.dataset, 'train_logrms_mean', 0.0), dtype=float))
     ckpt_mean = getattr(args, 'ckpt_train_logrms_mean', None)
-    if ckpt_mean is not None and abs(recomputed_mean - float(ckpt_mean)) > 1e-4:
-        print(f"⚠️ Warning: recomputed train_logrms_mean={recomputed_mean:.6f} differs from "
-              f"checkpoint anchor={float(ckpt_mean):.6f}. 진폭 z-score 통계 불일치 — split 구성 확인 필요.")
+    if ckpt_mean is not None:
+        ckpt_mean_arr = np.atleast_1d(np.asarray(ckpt_mean, dtype=float))
+        if (recomputed_mean.shape != ckpt_mean_arr.shape
+                or np.max(np.abs(recomputed_mean - ckpt_mean_arr)) > 1e-4):
+            print(f"⚠️ Warning: recomputed train_logrms_mean={recomputed_mean.tolist()} differs from "
+                  f"checkpoint anchor={ckpt_mean_arr.tolist()}. 진폭 z-score 통계 불일치 — split 구성 확인 필요.")
 
-model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject, amp_branch=bool(getattr(args, 'amp_branch', False)), amp_branch_hidden=int(args.amp_branch_hidden) if getattr(args, 'amp_branch_hidden', None) is not None else 32)
+model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject, amp_branch=bool(getattr(args, 'amp_branch', False)), amp_branch_hidden=int(args.amp_branch_hidden) if getattr(args, 'amp_branch_hidden', None) is not None else 32, amp_n_bands=int(getattr(args, 'amp_n_bands', 1) or 1))
 model = model.to(device)
 
 per_seed = []

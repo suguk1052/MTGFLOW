@@ -152,6 +152,28 @@ def summarize_measured_meta(op_signals, start, end, measured_meta_stats, vibrati
     return np.array([means[0], stds[0], means[1], stds[1], means[2], stds[2]], dtype=np.float32)
 
 
+def compute_band_rms(x, n_bands):
+    """작업 G-3a: 단일채널 window x(1D)를 rfft해 총 mean-square를 고정 K개 대역으로 분해,
+    대역별 RMS(=sqrt(대역 mean-square)) 벡터 (K,)를 반환한다.
+
+    - 대역 경계: rfft bin(0..N/2)을 연속 K개 그룹으로 균등 분할(np.array_split). train/test 비의존 고정.
+    - 실신호 한쪽 스펙트럼 파워 가중치(DC·Nyquist=1, 나머지=2)로 Parseval을 맞춰
+      Σ_k band_rms_k² = mean(x²) = (전대역 RMS)² 가 성립 → K=1이면 총 RMS와 일치.
+    """
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    N = len(x)
+    X = np.fft.rfft(x)
+    P = np.abs(X) ** 2
+    F = P.shape[0]                       # N//2 + 1
+    weights = np.full(F, 2.0)
+    weights[0] = 1.0                     # DC
+    if N % 2 == 0:
+        weights[-1] = 1.0                # Nyquist(짝수 N에서만 존재)
+    ms_per_bin = weights * P / (N ** 2)  # 각 bin의 mean-square 기여
+    band_ms = np.array([ms_per_bin[g].sum() for g in np.array_split(np.arange(F), n_bands)])
+    return np.sqrt(np.maximum(band_ms, 0.0)).astype(np.float32)  # (K,)
+
+
 class Paderborn_dataset(Dataset):
     def __init__(self, windows, labels, window_size, ids=None, metas=None, rms_z=None) -> None:
         super(Paderborn_dataset, self).__init__()
@@ -162,8 +184,13 @@ class Paderborn_dataset(Dataset):
         self.metas = np.asarray(metas, dtype=np.float32) if metas is not None else np.zeros((len(windows), 3), dtype=np.float32)
         # 작업 D(진폭 confound 교정): window별 z-scored log-RMS를 스코어 페널티용 feature로 carry.
         # 진폭 정규화(amp_normalize)를 쓰지 않는 실행에선 0으로 채워 하위호환.
-        self.rms_z = (np.asarray(rms_z, dtype=np.float32).reshape(-1, 1)
-                      if rms_z is not None else np.zeros((len(windows), 1), dtype=np.float32))
+        # 작업 G-3a: rms_z가 (N,) 스칼라 또는 (N,K) band 벡터 둘 다 가능. 1-D면 (N,1)로 승격,
+        # 2-D면 마지막 축(=band 수)을 그대로 보존. 빈 split도 안전(reshape 추론 오류 방지).
+        if rms_z is not None:
+            arr = np.asarray(rms_z, dtype=np.float32)
+            self.rms_z = arr.reshape(-1, 1) if arr.ndim == 1 else arr
+        else:
+            self.rms_z = np.zeros((len(windows), 1), dtype=np.float32)
 
     def __len__(self):
         return len(self.windows)
@@ -192,6 +219,7 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
                          measured_meta_stats='meanstd',
                          amp_normalize=False,
                          amp_normalize_channels='all',
+                         amp_n_bands=1,
                          rms_eps=1e-8,
                          order_track=False,
                          order_track_ref='nominal',
@@ -225,6 +253,11 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
     n_channels = len(sensor_names)
     if amp_normalize_channels not in ('all', 'vib_only'):
         raise ValueError("amp_normalize_channels must be one of ['all', 'vib_only']")
+    # 작업 G-3a: amplitude target을 스칼라 log-RMS → 고정 K-band log-RMS 벡터로 확장.
+    # K=1이면 기존 G-1(스칼라)과 수치적으로 동일. band 경계는 rfft bin 균등 K분할(train/test 비의존 고정).
+    amp_n_bands = int(amp_n_bands)
+    if amp_n_bands < 1:
+        raise ValueError("amp_n_bands must be a positive integer (>=1).")
     if measured_meta_stats not in ('mean', 'meanstd'):
         raise ValueError("measured_meta_stats must be one of ['mean', 'meanstd']")
     meta_input_dim = 3 if meta_source == 'static' or measured_meta_stats == 'mean' else 6
@@ -341,6 +374,7 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
         extracted_ids = []
         extracted_metas = []
         extracted_rms = []  # 작업 D: window별 원 RMS(정규화 전, 비-z-score). 다채널이면 채널별 (C,)
+        extracted_band_rms = []  # 작업 G-3a: window별 ch0 band RMS(정규화 전) (K,). amp_n_bands==1이면 미사용.
         setting_window_counts = {}
         for folder_path, f in file_tuple_list:
             bearing_id = extract_bearing_id(f)
@@ -366,6 +400,9 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
                 #   all      → 전 채널 각자 RMS로 나눠 단위진폭(shape-only).
                 #   vib_only → 채널0(진동 Vy)만 정규화, 전류는 raw 진폭 보존(진폭 confound 노출용).
                 rms_vec = np.sqrt(np.mean(w ** 2, axis=0))  # (C,)
+                # 작업 G-3a: band 모드에서만 ch0 window의 대역별 RMS(정규화 전)를 계산해 target 벡터로 쓴다.
+                if amp_n_bands > 1:
+                    extracted_band_rms.append(compute_band_rms(w[:, 0], amp_n_bands))  # (K,)
                 if amp_normalize:
                     if amp_normalize_channels == 'all':
                         w = w / (rms_vec + rms_eps)
@@ -396,23 +433,27 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
                        else np.empty((0, window_size, n_channels)))
             empty_rms = (np.empty((0,), dtype=np.float32) if n_channels == 1
                          else np.empty((0, n_channels), dtype=np.float32))
+            empty_band_rms = np.empty((0, amp_n_bands), dtype=np.float32)
             return (empty_w, np.array([], dtype=str),
                     np.empty((0, meta_input_dim), dtype=np.float32),
-                    empty_rms, setting_window_counts)
+                    empty_rms, empty_band_rms, setting_window_counts)
+        band_rms_arr = (np.array(extracted_band_rms, dtype=np.float32) if amp_n_bands > 1
+                        else np.empty((len(extracted_windows), amp_n_bands), dtype=np.float32))
         return (np.array(extracted_windows), np.array(extracted_ids),
                 np.array(extracted_metas, dtype=np.float32),
-                np.array(extracted_rms, dtype=np.float32), setting_window_counts)
+                np.array(extracted_rms, dtype=np.float32), band_rms_arr, setting_window_counts)
 
     # 🚀 Step 4: 멀티 도메인 데이터셋 윈도우 가공 및 빌딩
-    train_x, train_ids_per_window, train_meta, train_rms, train_setting_counts = extract_scaled_windows(train_file_tuples)
-    val_x, val_ids_per_window, val_meta, val_rms, val_setting_counts = extract_scaled_windows(val_file_tuples)
-    test_norm_x, test_norm_ids_per_window, test_norm_meta, test_norm_rms, test_norm_setting_counts = extract_scaled_windows(test_normal_file_tuples)
-    test_fault_x, test_fault_ids_per_window, test_fault_meta, test_fault_rms, test_fault_setting_counts = extract_scaled_windows(test_fault_file_tuples)
+    train_x, train_ids_per_window, train_meta, train_rms, train_band_rms, train_setting_counts = extract_scaled_windows(train_file_tuples)
+    val_x, val_ids_per_window, val_meta, val_rms, val_band_rms, val_setting_counts = extract_scaled_windows(val_file_tuples)
+    test_norm_x, test_norm_ids_per_window, test_norm_meta, test_norm_rms, test_norm_band_rms, test_norm_setting_counts = extract_scaled_windows(test_normal_file_tuples)
+    test_fault_x, test_fault_ids_per_window, test_fault_meta, test_fault_rms, test_fault_band_rms, test_fault_setting_counts = extract_scaled_windows(test_fault_file_tuples)
 
     test_x = np.concatenate([test_norm_x, test_fault_x], axis=0)
     test_ids_per_window = np.concatenate([test_norm_ids_per_window, test_fault_ids_per_window], axis=0)
     test_meta = np.concatenate([test_norm_meta, test_fault_meta], axis=0)
     test_rms = np.concatenate([test_norm_rms, test_fault_rms], axis=0)
+    test_band_rms = np.concatenate([test_norm_band_rms, test_fault_band_rms], axis=0)
 
     # 작업 D: log-RMS를 train-normal 기준 z-score → 스코어 페널티(z_rms)용 feature.
     # measured meta z-score(누수 방지, train stats로만 fit)와 동일 규약. amp_normalize=False여도
@@ -441,6 +482,31 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
     train_rms_z = _zscore_logrms(train_logrms)
     val_rms_z = _zscore_logrms(val_logrms)
     test_rms_z = _zscore_logrms(test_logrms)
+
+    # 작업 G-3a: band 모드면 위 스칼라 z-score를 (N,K) band log-RMS의 band별 z-score로 대체한다.
+    # band별 mean/std는 train-normal에서만 계산(누수 방지) → val/test에 동일 적용. test 정보 미사용.
+    if amp_n_bands > 1:
+        train_logband = np.log(train_band_rms + rms_eps) if len(train_band_rms) else train_band_rms
+        val_logband = np.log(val_band_rms + rms_eps) if len(val_band_rms) else val_band_rms
+        test_logband = np.log(test_band_rms + rms_eps) if len(test_band_rms) else test_band_rms
+        if len(train_logband):
+            band_mean = train_logband.mean(axis=0)          # (K,)
+            band_std = train_logband.std(axis=0)            # (K,)
+        else:
+            band_mean = np.zeros(amp_n_bands, dtype=np.float64)
+            band_std = np.ones(amp_n_bands, dtype=np.float64)
+
+        def _zscore_logband(a):
+            if not len(a):
+                return np.empty((0, amp_n_bands), dtype=np.float32)
+            return ((a - band_mean) / (band_std + 1e-8)).astype(np.float32)
+
+        train_rms_z = _zscore_logband(train_logband)
+        val_rms_z = _zscore_logband(val_logband)
+        test_rms_z = _zscore_logband(test_logband)
+        # metadata 앵커: band 모드에선 길이 K 리스트로 노출(스칼라 필드와 구분).
+        train_logrms_mean = band_mean.astype(float).tolist()
+        train_logrms_std = band_std.astype(float).tolist()
 
     if meta_source == 'measured':
         train_meta_mean = train_meta.mean(axis=0)
@@ -488,8 +554,16 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
 
     if amp_normalize:
         norm_target = 'all channels' if amp_normalize_channels == 'all' else 'vibration(ch0) only'
-        print(f'Amplitude Normalize: per-window RMS [{norm_target}] '
-              f'(ch0 log-RMS train z-score: mean={train_logrms_mean:.4f}, std={train_logrms_std:.4f})')
+        if amp_n_bands > 1:
+            # band 모드: mean/std가 길이 K 리스트라 요약만 출력.
+            _bm = np.asarray(train_logrms_mean, dtype=float)
+            _bs = np.asarray(train_logrms_std, dtype=float)
+            print(f'Amplitude Normalize: per-window RMS [{norm_target}] | G-3a {amp_n_bands}-band '
+                  f'ch0 log-RMS train z-score: mean(min/max)={_bm.min():.4f}/{_bm.max():.4f}, '
+                  f'std(min/max)={_bs.min():.4f}/{_bs.max():.4f}')
+        else:
+            print(f'Amplitude Normalize: per-window RMS [{norm_target}] '
+                  f'(ch0 log-RMS train z-score: mean={train_logrms_mean:.4f}, std={train_logrms_std:.4f})')
 
     if order_track:
         rev_per_window = window_size / ot_spr
@@ -508,6 +582,7 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
         ds.train_logrms_mean = train_logrms_mean
         ds.train_logrms_std = train_logrms_std
         ds.amp_normalize = bool(amp_normalize)
+        ds.amp_n_bands = int(amp_n_bands)  # 작업 G-3a: main.py가 checkpoint metadata에 앵커로 저장
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=not label)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)

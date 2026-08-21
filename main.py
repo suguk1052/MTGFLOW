@@ -60,6 +60,10 @@ parser.add_argument('--amp_branch', action='store_true',
                     help='작업 G-1: amplitude branch(조건부 진폭 head) 추가. 학습 loss = shape_NLL + amp_NLL(Joint). --amp_normalize 필수.')
 parser.add_argument('--amp_branch_hidden', type=int, default=32,
                     help='작업 G-1: amplitude head MLP hidden 차원.')
+# 작업 G-3a(band amplitude): 진폭 target을 스칼라 log-RMS → 고정 K-band log-RMS 벡터로 확장.
+parser.add_argument('--amp_n_bands', type=int, default=1,
+                    help='작업 G-3a: amplitude target band 수. 1이면 G-1(스칼라)과 동일. >1이면 '
+                         'ch0 window의 rfft bin을 균등 K분할한 band별 log-RMS를 band별 train-normal z-score해 target으로 씀.')
 # 작업 E(order tracking): 각도영역 상수-SPR 리샘플. 저속 unseen 세팅을 학습 각도 스케일로 정렬.
 parser.add_argument('--order_track', action='store_true',
                     help='작업 E: 파일 vibration을 상수 SPR로 각도영역 리샘플(window당 회전각 정렬). 저속 fold 전용.')
@@ -136,6 +140,17 @@ def resolve_meta_input_dim(args):
     return 6
 
 
+def _logrms_stat_for_meta(value):
+    # 작업 G-3a: train log-RMS 통계는 G-1(스칼라 float) 또는 band 모드(길이 K 리스트) 둘 다 가능.
+    # JSON 직렬화 가능한 float/list로 정규화해 checkpoint metadata에 그대로 앵커한다.
+    if isinstance(value, (list, tuple)):
+        return [float(v) for v in value]
+    if hasattr(value, 'tolist'):  # numpy array/scalar
+        v = value.tolist()
+        return [float(x) for x in v] if isinstance(v, list) else float(v)
+    return float(value)
+
+
 def build_paderborn_metadata(args):
     return {
         'run_name': args.run_name,
@@ -166,12 +181,15 @@ def build_paderborn_metadata(args):
         # 작업 G-1(dual-branch disentangle)
         'amp_branch': bool(getattr(args, 'amp_branch', False)),
         'amp_branch_hidden': int(getattr(args, 'amp_branch_hidden', 32)),
+        # 작업 G-3a(band amplitude)
+        'amp_n_bands': int(getattr(args, 'amp_n_bands', 1)),
         # 작업 E(order tracking)
         'order_track': bool(args.order_track),
         'order_track_ref': str(args.order_track_ref),
         'order_track_ref_rpm': (None if args.order_track_ref_rpm is None else float(args.order_track_ref_rpm)),
-        'train_logrms_mean': float(getattr(args, 'train_logrms_mean', 0.0)),
-        'train_logrms_std': float(getattr(args, 'train_logrms_std', 1.0)),
+        # 작업 D/G-1은 스칼라, G-3a(band)면 길이 K 리스트. 원형 그대로 저장(스칼라/리스트 분기 없이 앵커).
+        'train_logrms_mean': _logrms_stat_for_meta(getattr(args, 'train_logrms_mean', 0.0)),
+        'train_logrms_std': _logrms_stat_for_meta(getattr(args, 'train_logrms_std', 1.0)),
     }
 
 def resolve_save_path(args):
@@ -251,6 +269,7 @@ for seed in args.seeds:
             measured_meta_stats=args.measured_meta_stats,
             amp_normalize=args.amp_normalize,
             amp_normalize_channels=args.amp_normalize_channels,
+            amp_n_bands=args.amp_n_bands,
             rms_eps=args.rms_eps,
             order_track=args.order_track,
             order_track_ref=args.order_track_ref,
@@ -258,15 +277,19 @@ for seed in args.seeds:
         )
         # 작업 D: 진폭 정규화 시 train-normal log-RMS 통계를 checkpoint metadata에 앵커로 저장
         # (test 재구성이 동일 통계를 쓰는지 검증용). 로더가 dataset 속성으로 노출.
-        args.train_logrms_mean = float(getattr(train_loader.dataset, 'train_logrms_mean', 0.0))
-        args.train_logrms_std = float(getattr(train_loader.dataset, 'train_logrms_std', 1.0))
+        # 작업 G-3a: band 모드면 통계가 길이 K 리스트라 float() 캐스팅을 하지 않고 원형을 그대로 보관.
+        args.train_logrms_mean = getattr(train_loader.dataset, 'train_logrms_mean', 0.0)
+        args.train_logrms_std = getattr(train_loader.dataset, 'train_logrms_std', 1.0)
 
     # %%
     # 작업 G-1: amp_branch는 shape-only window(amp_normalize)를 전제로 함(진폭 정보 차단).
     if getattr(args, 'amp_branch', False) and not args.amp_normalize:
         raise ValueError('--amp_branch requires --amp_normalize (shape-only window). '
                          'shape 정보만으로 h_shape를 만들어 p(a|h_shape)를 학습하는 구조이므로 진폭 정규화가 필수.')
-    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject, amp_branch=getattr(args, 'amp_branch', False), amp_branch_hidden=args.amp_branch_hidden)
+    # 작업 G-3a: band 모드(amp_n_bands>1)는 amp_branch를 전제로 함(band target을 쓰는 head가 있어야 의미).
+    if int(getattr(args, 'amp_n_bands', 1)) > 1 and not getattr(args, 'amp_branch', False):
+        raise ValueError('--amp_n_bands>1 requires --amp_branch (band별 조건부 진폭 head를 학습하는 구조).')
+    model = MTGFLOW(args.n_blocks, args.input_size, args.hidden_size, args.n_hidden, args.window_size, n_sensor, dropout=0.0, model=args.model, batch_norm=args.batch_norm, use_meta=args.use_meta, meta_input_dim=resolve_meta_input_dim(args), meta_emb_dim=args.meta_emb_dim, meta_inject=args.meta_inject, amp_branch=getattr(args, 'amp_branch', False), amp_branch_hidden=args.amp_branch_hidden, amp_n_bands=int(getattr(args, 'amp_n_bands', 1)))
     model = model.to(device)
 
     # %%

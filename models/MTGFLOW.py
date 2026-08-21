@@ -128,7 +128,7 @@ class ScaleDotProductAttention(nn.Module):
 
 class MTGFLOW(nn.Module):
 
-    def __init__ (self, n_blocks, input_size, hidden_size, n_hidden, window_size, n_sensor, dropout = 0.1, model="MAF", batch_norm=True, use_meta=False, meta_input_dim=3, meta_emb_dim=8, meta_inject='concat', amp_branch=False, amp_branch_hidden=32):
+    def __init__ (self, n_blocks, input_size, hidden_size, n_hidden, window_size, n_sensor, dropout = 0.1, model="MAF", batch_norm=True, use_meta=False, meta_input_dim=3, meta_emb_dim=8, meta_inject='concat', amp_branch=False, amp_branch_hidden=32, amp_n_bands=1):
         super(MTGFLOW, self).__init__()
 
         self.rnn = nn.LSTM(input_size=input_size,hidden_size=hidden_size,batch_first=True, dropout=dropout)
@@ -138,12 +138,15 @@ class MTGFLOW(nn.Module):
         # 작업 G-1: dual-branch disentangle. shape branch(기존 flow NLL)와 별개로,
         # shape 정보만으로 만든 h_shape로 조건부 진폭 p(a|h_shape)=N(μ,σ²)를 학습하는 amplitude head.
         # amp_head 출력 = (μ, logσ). shape encoder(rnn/gcn)와 gradient를 공유(Joint 학습).
+        # 작업 G-3a: 진폭 target을 스칼라 → 고정 K-band log-RMS 벡터로 확장. head는 K개 band의
+        # (μ_k, logσ_k)를 출력(=2*K). K=1이면 G-1과 동일 구조.
         self.amp_branch = amp_branch
+        self.amp_n_bands = int(amp_n_bands)
         if self.amp_branch:
             self.amp_head = nn.Sequential(
                 nn.Linear(hidden_size, amp_branch_hidden),
                 nn.ReLU(),
-                nn.Linear(amp_branch_hidden, 2),
+                nn.Linear(amp_branch_hidden, 2 * self.amp_n_bands),
             )
         else:
             self.amp_head = None
@@ -229,7 +232,7 @@ class MTGFLOW(nn.Module):
     def forward_disentangle(self, x, meta, a):
         # 작업 G-1: shape branch(log_prob)와 amplitude branch(p(a|h_shape))를 한 번의 encode로 계산.
         # 반환: (shape_logprob[N], amp_logprob[N]) — 둘 다 값이 클수록 정상(로그우도).
-        # x: N X K X L X D, a: N X 1 (window별 z-scored log-RMS = batch[4])
+        # x: N X K X L X D, a: N X K_band (window별 band별 z-scored log-RMS = batch[4]; G-1은 K_band=1)
         if self.amp_head is None:
             raise ValueError("forward_disentangle requires amp_branch=True.")
         full_shape = x.shape
@@ -242,14 +245,17 @@ class MTGFLOW(nn.Module):
 
         # amplitude branch: 진폭 정보가 차단된 h(shape encoder 출력)를 (K,L)로 pooling → h_shape.
         # h_shape로 조건부 진폭 정상분포 N(μ, σ²)를 예측. Gaussian NLL(대칭) 사용.
+        # 작업 G-3a: head가 K_band개 band의 (μ_k, logσ_k)를 출력(2*K_band). band별 대각 Gaussian
+        # log-density를 band축 평균(1/K Σ)해 스칼라 amp_logprob으로 집계 → K_band=1이면 G-1과 동일.
+        Kb = self.amp_n_bands
         h_shape = h.mean(dim=(1, 2))                      # N X H
-        amp_params = self.amp_head(h_shape)               # N X 2
-        mu, log_sigma = amp_params[:, 0:1], amp_params[:, 1:2]
+        amp_params = self.amp_head(h_shape)               # N X (2*Kb)
+        mu, log_sigma = amp_params[:, :Kb], amp_params[:, Kb:2 * Kb]  # 각 N X Kb
         log_sigma = torch.clamp(log_sigma, min=-7.0, max=7.0)
-        a = a.to(device=mu.device, dtype=mu.dtype).reshape(-1, 1)
-        amp_logprob = (-0.5 * ((a - mu) / torch.exp(log_sigma)) ** 2
-                       - log_sigma - 0.5 * math.log(2 * math.pi))
-        amp_logprob = amp_logprob.reshape(full_shape[0])  # N
+        a = a.to(device=mu.device, dtype=mu.dtype).reshape(full_shape[0], Kb)
+        amp_logprob_band = (-0.5 * ((a - mu) / torch.exp(log_sigma)) ** 2
+                            - log_sigma - 0.5 * math.log(2 * math.pi))  # N X Kb
+        amp_logprob = amp_logprob_band.mean(dim=1)        # N (band축 평균)
 
         # shape branch: 기존 test()와 동일한 flow log_prob.
         h = self._append_meta_condition(h, meta, full_shape)

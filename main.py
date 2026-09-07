@@ -63,7 +63,14 @@ parser.add_argument('--amp_branch_hidden', type=int, default=32,
 # 작업 G-3a(band amplitude): 진폭 target을 스칼라 log-RMS → 고정 K-band log-RMS 벡터로 확장.
 parser.add_argument('--amp_n_bands', type=int, default=1,
                     help='작업 G-3a: amplitude target band 수. 1이면 G-1(스칼라)과 동일. >1이면 '
-                         'ch0 window의 rfft bin을 균등 K분할한 band별 log-RMS를 band별 train-normal z-score해 target으로 씀.')
+                         'ch0 window의 rfft bin을 K분할한 band별 log-RMS를 band별 train-normal z-score해 target으로 씀.')
+# 작업 P-2(밴드 분할 방식): band 경계 산출 규칙. 밴드 수(amp_n_bands)와 분리해 분할 방식만 비교.
+parser.add_argument('--amp_band_scheme', type=str, default='linear', choices=['linear', 'log', 'energy'],
+                    help='작업 P-2: rfft bin→band 분할 방식. linear=균등분할(G-3a 기존, bit-identical), '
+                         'log=로그 상대경계(데이터 무의존), energy=fold별 train-normal 평균 PSD 누적 1/K 분위(누수 없음). '
+                         'amp_n_bands>1일 때만 의미.')
+parser.add_argument('--amp_band_min_width', type=int, default=4,
+                    help='작업 P-2: energy 분할의 band별 최소 rfft bin 폭 가드(발동 시 경고 출력).')
 # 작업 E(order tracking): 각도영역 상수-SPR 리샘플. 저속 unseen 세팅을 학습 각도 스케일로 정렬.
 parser.add_argument('--order_track', action='store_true',
                     help='작업 E: 파일 vibration을 상수 SPR로 각도영역 리샘플(window당 회전각 정렬). 저속 fold 전용.')
@@ -183,6 +190,10 @@ def build_paderborn_metadata(args):
         'amp_branch_hidden': int(getattr(args, 'amp_branch_hidden', 32)),
         # 작업 G-3a(band amplitude)
         'amp_n_bands': int(getattr(args, 'amp_n_bands', 1)),
+        # 작업 P-2(밴드 분할 방식)
+        'amp_band_scheme': str(getattr(args, 'amp_band_scheme', 'linear')),
+        'amp_band_min_width': int(getattr(args, 'amp_band_min_width', 4)),
+        'amp_band_edges': (list(getattr(args, 'amp_band_edges', None)) if getattr(args, 'amp_band_edges', None) is not None else None),
         # 작업 E(order tracking)
         'order_track': bool(args.order_track),
         'order_track_ref': str(args.order_track_ref),
@@ -270,6 +281,8 @@ for seed in args.seeds:
             amp_normalize=args.amp_normalize,
             amp_normalize_channels=args.amp_normalize_channels,
             amp_n_bands=args.amp_n_bands,
+            amp_band_scheme=args.amp_band_scheme,
+            amp_band_min_width=args.amp_band_min_width,
             rms_eps=args.rms_eps,
             order_track=args.order_track,
             order_track_ref=args.order_track_ref,
@@ -280,6 +293,8 @@ for seed in args.seeds:
         # 작업 G-3a: band 모드면 통계가 길이 K 리스트라 float() 캐스팅을 하지 않고 원형을 그대로 보관.
         args.train_logrms_mean = getattr(train_loader.dataset, 'train_logrms_mean', 0.0)
         args.train_logrms_std = getattr(train_loader.dataset, 'train_logrms_std', 1.0)
+        # 작업 P-2: fold별 산출된 band 경계(edges)를 metadata에 앵커(재현·검증용).
+        args.amp_band_edges = getattr(train_loader.dataset, 'amp_band_edges', None)
 
     # %%
     # 작업 G-1: amp_branch는 shape-only window(amp_normalize)를 전제로 함(진폭 정보 차단).

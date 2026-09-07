@@ -197,7 +197,7 @@ def main():
         vsplit, vlono = "023to1", 2
         meta, run = g3a_ckpt_meta(vsplit, vlono, args.seed)
         with contextlib.redirect_stdout(io.StringIO()):
-            tr, _, _ = loader_Paderborn_OCC(
+            tr, _, _, _ = loader_Paderborn_OCC(
                 root=DATA_ROOT,
                 train_loads=meta["train_load_setting"], test_loads=meta["test_load_setting"],
                 train_ids=meta["train_ids"], val_ids=meta["val_ids"],

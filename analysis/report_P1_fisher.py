@@ -182,22 +182,39 @@ def main():
         L.append(f"| {n} | " + " | ".join(cells) + " |")
     L.append("")
 
-    # paired Wilcoxon vs ref
-    L.append(f"## 24-fold paired Wilcoxon (N vs ref N={ref})")
+    # paired Wilcoxon vs ref (+ Holm-Bonferroni 다중비교 보정)
+    def holm(pvals):
+        """Holm-Bonferroni 보정. pvals: list(float|None) → adjusted(list). None은 보정 제외."""
+        idx = [i for i, p in enumerate(pvals) if p is not None]
+        m = len(idx)
+        adj = [None] * len(pvals)
+        prev = 0.0
+        for rank, i in enumerate(sorted(idx, key=lambda j: pvals[j])):
+            a = min(1.0, pvals[i] * (m - rank))
+            a = max(a, prev)
+            prev = a
+            adj[i] = a
+        return adj
+
+    L.append(f"## 24-fold paired Wilcoxon signed-rank test (N vs ref N={ref})")
     L.append("")
-    L.append("| N | 지표 | n_fold | mean_diff(N−ref) | pos/neg | p-value |")
-    L.append("|---|---|---|---|---|---|")
-    for n in ns:
-        if n == ref:
-            continue
-        for m, lbl in METHS:
-            r = paired(n, ref, args.seeds, m)
+    L.append(f"> 각 fold의 seed평균 Fisher(B)/equal-z(A) AUROC로 24-fold pairing 후 **Wilcoxon signed-rank test**"
+             f"(정규성 무가정, 양측). mean_diff>0 이면 N이 ref보다 높음. "
+             f"여러 N을 ref와 비교하므로 **Holm-Bonferroni 보정 p**(m=비교 N 수={len([n for n in ns if n!=ref])})도 병기. "
+             f"탐색용 — N* 판정은 P-G2.")
+    L.append("")
+    for m, lbl in METHS:
+        cand = [n for n in ns if n != ref]
+        raws = [paired(n, ref, args.seeds, m) for n in cand]
+        holm_p = holm([r["p"] for r in raws])
+        L.append(f"### {lbl}")
+        L.append("| N | n_fold | mean_diff(N−ref) | pos/neg | p(raw) | p(Holm) |")
+        L.append("|---|---|---|---|---|---|")
+        for n, r, hp in zip(cand, raws, holm_p):
             pstr = "nan" if r["p"] is None else f"{r['p']:.4f}"
-            L.append(f"| {n} | {lbl} | {r['n']} | {r['mean_diff']:+.4f} | {r['n_pos']}/{r['n_neg']} | {pstr} |")
-    L.append("")
-    L.append("> mean_diff>0 이면 N이 ref보다 높음. p는 fold별 차이의 부호검정(정규성 무가정). "
-             "탐색용 — N* 확정은 전체 N·N=24 완료 후.")
-    L.append("")
+            hstr = "nan" if hp is None else f"{hp:.4f}"
+            L.append(f"| {n} | {r['n']} | {r['mean_diff']:+.4f} | {r['n_pos']}/{r['n_neg']} | {pstr} | {hstr} |")
+        L.append("")
 
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with open(report_path, "w") as f:

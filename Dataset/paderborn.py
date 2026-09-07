@@ -621,8 +621,12 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
         test_norm_band_rms = _reduce_ms(test_norm_band_rms)
         test_fault_band_rms = _reduce_ms(test_fault_band_rms)
     elif amp_n_bands > 1 and _band_boundaries_used is not None:
-        # linear/log: 노출용 edges(각 band 첫 bin + F) 직렬화.
-        _band_edges_serial = [int(g[0]) for g in _band_boundaries_used] + [int(_band_F)]
+        # linear/log: 노출용 edges 직렬화. log는 adaptive·EDA와 동일 관례([1..F], DC는 band0 암묵 소속)를
+        # 쓰도록 info["edges"]를 그대로 저장(관례 불일치 방지). linear는 edges=None이라 group 첫 bin+F로 대체.
+        _ns_groups, _ns_info = compute_band_boundaries(
+            _band_F, amp_n_bands, amp_band_scheme, min_width=amp_band_min_width, return_info=True)
+        _band_edges_serial = (_ns_info["edges"] if _ns_info["edges"] is not None
+                              else [int(g[0]) for g in _band_boundaries_used] + [int(_band_F)])
 
     test_x = np.concatenate([test_norm_x, test_fault_x], axis=0)
     test_ids_per_window = np.concatenate([test_norm_ids_per_window, test_fault_ids_per_window], axis=0)

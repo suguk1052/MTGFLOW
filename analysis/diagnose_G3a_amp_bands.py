@@ -105,6 +105,10 @@ def build_loader(meta, batch_size):
             measured_meta_stats=meta.get("measured_meta_stats", "meanstd"),
             amp_normalize=bool(meta.get("amp_normalize", False)),
             amp_n_bands=int(meta.get("amp_n_bands", 1)),
+            # 작업 P-2: band 분할 방식을 checkpoint에서 복원(누락 시 dump가 linear로 target을 만들어
+            # energy/log checkpoint와 어긋남). 구 g3a(키 없음)는 linear 하위호환.
+            amp_band_scheme=meta.get("amp_band_scheme", "linear"),
+            amp_band_min_width=int(meta.get("amp_band_min_width", 4)),
             rms_eps=float(meta.get("rms_eps", 1e-8)),
             batch_size=batch_size,
         )

@@ -225,7 +225,6 @@ def _energy_edges_with_guard(psd, n_bands, F, min_width):
     raw_edges = list(edges)
     # 최소폭 가드: 좌→우(아래에서 밀기)
     for k in range(1, n_bands + 1):
-        lo = min_width if k < n_bands + 1 else 0
         if edges[k] < edges[k - 1] + min_width:
             edges[k] = edges[k - 1] + min_width
     edges[n_bands] = F

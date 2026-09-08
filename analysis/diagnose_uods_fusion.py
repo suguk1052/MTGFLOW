@@ -63,19 +63,16 @@ def load_npz(path):
     return d, meta
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--proposed_cache", required=True)
-    ap.add_argument("--raw_cache", default=None)
-    ap.add_argument("--threshold_percentile", type=float, default=95.0)
-    ap.add_argument("--out_dir", default=OUT_DIR)
-    args = ap.parse_args()
+def evaluate_run(proposed_cache, raw_cache=None, thr_pct=95.0):
+    """proposed(+옵션 raw) dump에서 method×subgroup AUROC·val-95 FPR·sanity를 계산해 dict 반환.
 
-    d, meta = load_npz(args.proposed_cache)
+    보정(tail 확률·equal-z·threshold)은 모두 val-normal only. report_uods_pilot이 seed별로 재사용.
+    """
+    d, meta = load_npz(proposed_cache)
     assert meta.get("kind") == "proposed", "proposed_cache must be a proposed dump"
     te_sh, te_am = d["te_sh"], d["te_am"]
     va_sh, va_am = d["va_sh"], d["va_am"]
-    state = d["te_state"]; fam = d["te_fam"]; isball = d["te_isball"]; te_lab = d["te_lab"]
+    state = d["te_state"]; fam = d["te_fam"]; isball = d["te_isball"]
     norm = np.asarray(state, int) == 0
 
     # 최종 결합(동결): 각 branch를 val-normal tail 확률로 변환 → Fisher χ². equal-z는 비교기준.
@@ -90,8 +87,8 @@ def main():
         "equal_z": (eqz_te, eqz_va),
         "fisher": (fisher_te, fisher_va),
     }
-    if args.raw_cache:
-        dr, mr = load_npz(args.raw_cache)
+    if raw_cache:
+        dr, mr = load_npz(raw_cache)
         assert mr.get("kind") == "raw", "raw_cache must be a raw dump"
         # raw dump이 동일 split·순서인지 확인(누수·정렬 sanity)
         assert np.array_equal(dr["te_state"], state) and np.array_equal(dr["te_ids"], d["te_ids"]), \
@@ -101,7 +98,7 @@ def main():
     results = {}
     for name, (te_s, va_s) in methods.items():
         sub = subgroup_aurocs(te_s, state, fam, isball)
-        fpr, thr = fpr_at_val95(te_s[norm], va_s, args.threshold_percentile)
+        fpr, thr = fpr_at_val95(te_s[norm], va_s, thr_pct)
         results[name] = dict(subgroup=sub, fpr_val95=fpr, threshold=thr)
 
     # sanity: fisher ≡ product-of-p (단조 동치) → AUROC 동일해야 함
@@ -111,12 +108,24 @@ def main():
     sanity = dict(fisher_vs_prodp_absdiff=abs(auroc_fisher - auroc_prodp),
                   n_test=int(len(state)), n_norm=int(norm.sum()), n_fault=int((~norm).sum()),
                   all_finite=bool(np.isfinite(fisher_te).all() and np.isfinite(eqz_te).all()))
+    return dict(run_name=meta.get("run_name", "uods"), source=meta.get("source"),
+                band_scheme=meta.get("amp_band_scheme"), band_edges=meta.get("amp_band_edges"),
+                threshold_percentile=thr_pct, methods=results, sanity=sanity,
+                proposed_cache=proposed_cache, raw_cache=raw_cache)
 
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--proposed_cache", required=True)
+    ap.add_argument("--raw_cache", default=None)
+    ap.add_argument("--threshold_percentile", type=float, default=95.0)
+    ap.add_argument("--out_dir", default=OUT_DIR)
+    args = ap.parse_args()
+
+    out = evaluate_run(args.proposed_cache, args.raw_cache, args.threshold_percentile)
+    results = out["methods"]; sanity = out["sanity"]; methods = results
     os.makedirs(args.out_dir, exist_ok=True)
-    run = meta.get("run_name", "uods")
-    out = dict(run_name=run, source=meta.get("source"), band_scheme=meta.get("amp_band_scheme"),
-               band_edges=meta.get("amp_band_edges"), threshold_percentile=args.threshold_percentile,
-               methods=results, sanity=sanity, proposed_cache=args.proposed_cache, raw_cache=args.raw_cache)
+    run = out["run_name"]
     out_path = os.path.join(args.out_dir, f"{run}.json")
     with open(out_path, "w") as f:
         json.dump(out, f, indent=2, ensure_ascii=False)

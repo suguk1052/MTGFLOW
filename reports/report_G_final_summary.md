@@ -2,7 +2,8 @@
 
 > 5-seed [2024·2025·2026·2027·2028] × 24 fold(4 split × 6 LONO) mean±std. AUROC primary.
 > threshold = val-normal score 95pct 고정(test 라벨 튜닝 없음). raw = B3 flow_NLL.
-> 최종 채택 = **G-3a 학습 구조 + G-5 Fisher-tail fusion**. 재현 경로 `report_G_final_pipeline.md`.
+> 최종 채택 = **G-3a 학습 구조 + G-5 Fisher-tail fusion + P-2 log 밴드 분할**(N=6+log, 2026-09 승격, Fisher **0.877±0.013**).
+> P-2 이전 기준(linear) = 0.800(태그 `g-final-linear-preP2`). 재현 경로 `report_G_final_pipeline.md`.
 
 ---
 
@@ -50,9 +51,34 @@
 
 ---
 
+## 2′) ⭐ P-2 최종 승격 — N=6 + **log** 밴드 분할 (2026-09)
+
+P-2(밴드 분할 방식 ablation)에서 **log 분할이 linear(현행)를 clean-win으로 대체**(사전 고정 P-G2 3조건 충족).
+N=6 고정, 분할 방식만 비교. **N=6 + log를 새 최종 학습 구조로 채택.** linear 최종(Fisher 0.800)은 **P-2 이전 기준**으로 보존(git 태그 `g-final-linear-preP2`).
+이 선택은 전역 조합 최적화가 아니라 사전 정의한 순차적 ablation(P-1 밴드 수 → P-2 분할 방식) 결과다. N×scheme 추가 sweep은 하지 않음.
+
+| 지표 | linear (P-2 이전 기준) | **log (신 최종)** |
+|---|---|---|
+| **전체 AUROC (Fisher-tail B)** | 0.800±0.049 | **0.877±0.013** |
+| equal-z (A) | 0.762±0.058 | 0.857±0.014 |
+| amp-sensitive fault | 0.779 | 0.842 |
+| shape-sensitive fault | 0.828 | 0.923 |
+| zero-support 외삽 | 0.778 | 0.855 |
+| compositional | 0.866 | 0.943 |
+| 정상 FPR 고진폭 | 0.155 | 0.132 |
+| 정상 FPR 저진폭 | 0.418 | 0.458 |
+
+- log vs linear: +0.077, **paired Wilcoxon p=0.0002 (Holm 0.0004), 24 fold 중 21 fold 우세.** seed std 0.049→0.013(안정성↑).
+- **모든 사전 지정 AUROC 하위군에서 개선.** 단 **저진폭 정상 FPR 0.418→0.458 악화**(확정 limitation 축; paired p=0.14 비유의 = 평균 이동 수준).
+- log = **데이터 무의존 고정 경계** edges=[1,3,10,32,102,323,1025](저주파 집중). energy(fold별 적응 경계)는 linear와 동률(−0.011, p=0.75 → 미채택).
+- 기여점 = 특정 PU 경계가 아니라 "저주파 집중 로그 밴드"라는 분할 규칙. 상세 `report_P2_band_scheme.md`.
+- **최종 재현은 학습·dump에 `--amp_band_scheme log` 명시**(`report_G_final_pipeline.md`). P-3 fusion·외부 데이터셋은 N=6+log 캐시·구조 기준.
+
+---
+
 ## 3) 남은 limitation (조건부 GO인 이유)
 
-1. **저진폭 정상 FPR 악화**: 0.095(raw) → 0.323(A) → **0.418(B)**. 120셀 중 77%·5/5 seed 일관 = 실질 악화.
+1. **저진폭 정상 FPR 악화**: 0.095(raw) → 0.323(A) → **0.418(B, linear)** → **0.458(B, log 최종)**. 120셀 중 77%·5/5 seed 일관 = 실질 악화.
    원인 = val(저진폭)↔test(고진폭) 진폭 분포 shift 축. Fisher-tail이 이 축을 더 민감하게 만듦(`report_G5_fpr_consistency.md`).
    → 후속 **pseudo-LOSO**가 정확히 이 저진폭 축을 겨냥.
 2. **일부 amp-sensitive fault 회복 실패**: KA30 `S_amp`≈0.35 / KI04 `S_amp`≈0.35 → fusion 후에도 KA30 0.588·KI04 0.604로 낮음.

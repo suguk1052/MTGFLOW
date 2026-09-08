@@ -1,6 +1,6 @@
 # G 트랙 최종 inference 경로 — 재현 매뉴얼 (`claude/g-final`)
 
-> **최종 채택안 = G-3a 학습 구조 + G-5 Fisher-tail fusion.** 이 문서는 raw 신호에서
+> **최종 채택안 = G-3a 학습 구조 + G-5 Fisher-tail fusion + P-2 log 밴드 분할(N=6+log, 2026-09 승격).** 이 문서는 raw 신호에서
 > 최종 window-level 이상점수(`S_fisher`)까지의 재현 가능한 코드 경로를 고정한다.
 > 상세 수치·판정 근거는 `report_G_final_summary.md`(비교표)·`report_G5_tail_fusion_5seeds.md`(5-seed).
 
@@ -107,3 +107,47 @@ conda run -n mtgflow python report_G5_5seeds.py --seeds 2024 2025 2026 2027 2028
 - overall: raw 0.696±0.014 / S_shape 0.776±0.047 / S_amp 0.652±0.011 / A(equal-z) 0.762±0.058 / **B(Fisher-tail) 0.800±0.049**.
 
 > 재현 상세 표는 `report_G_final_summary.md` §재현성.
+
+---
+
+## 5. ⭐ P-2 최종 승격 — N=6 + log 밴드 분할 (2026-09, 신 최종)
+
+P-2(밴드 분할 방식 ablation)에서 **log 분할이 linear를 clean-win으로 대체**(사전 고정 P-G2 3조건 충족, Fisher **0.877±0.013** vs linear 0.800).
+**신 최종 = N=6 + log.** 학습 구조(G-3a)·fusion(G-5 Fisher-tail)은 불변, **밴드 경계 산출만 균등분할(linear)→로그(log)** 로 교체.
+
+- `--amp_band_scheme` CLI **기본값은 linear 유지**(구 linear checkpoint 재현성 보존: 구 ckpt는 metadata에 키가 없어 test.py가 자동 `linear` 복원).
+  → **최종 재현은 학습·dump에 `--amp_band_scheme log`를 반드시 명시.**
+- log 밴드 경계(고정·데이터 무의존): rfft bin edges `[1, 3, 10, 32, 102, 323, 1025]`(F=1025, 31.25 Hz/bin, 저주파 집중).
+
+**최종(log) 학습 명령**(예):
+
+```bash
+# runners/Paderborn/P2_band_partition/log/run_Paderborn_p2_log_<split>_LONO<n>_5seeds.sh
+conda run -n mtgflow python main.py --name=paderborn --run_name="p2_log_<split>_LONO<n>" \
+    --n_blocks=2 --batch_size=256 --window_size=2048 --stride_size=1024 --sampling_rate=64000 \
+    --train_load_setting <...> --test_load_setting <...> \
+    --train_ids <...> --val_ids <...> --test_norm_ids <...> \
+    --seeds 2024 2025 2026 2027 2028 \
+    --amp_branch --amp_n_bands 6 --amp_normalize --amp_band_scheme log
+# → results/Paderborn/p2_log_<split>_LONO<n>_s<seed>/model.pth (120)
+```
+
+**최종(log) dump→fusion→집계**:
+
+```bash
+# dump(GPU forward-only): 로더가 ckpt metadata의 amp_band_scheme=log를 복원해 target을 log 밴드로 재구성
+#   (P-2에서 diagnose_G3a_amp_bands.build_loader의 scheme 미복원 버그를 수정)
+bash runners/Paderborn/P2_band_partition/submit_P2_dump.sh          # SCHEMES=log 로 log만 가능
+# fusion(CPU): cache_dir/out_dir만 log로 지정
+for s in 2024 2025 2026 2027 2028; do
+  conda run -n mtgflow python analysis/diagnose_G5_tail_fusion.py --seed $s \
+    --cache_dir results/Paderborn/p2_log_window_scores \
+    --diag_dir results/Paderborn/diag_G3a_amp_bands \
+    --out_dir results/Paderborn/diag_P2_log_tail_fusion
+done
+# 집계: linear/log/energy 비교표
+conda run -n mtgflow python analysis/report_P2_scheme.py --schemes linear log energy --ref linear
+```
+
+- **linear(P-2 이전) 최종은 git 태그 `g-final-linear-preP2`로 보존**(삭제 없음). P-2 브랜치·linear 캐시(`g3a_window_scores`,`diag_G5_tail_fusion`)도 보존.
+- 이후 **P-3(fusion family)·외부 데이터셋은 N=6+log 캐시·구조 기준**으로 수행. 상세 `report_P2_band_scheme.md`.

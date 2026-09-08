@@ -136,7 +136,9 @@ def main():
         if win: both_win.append(f)
         L.append(f"| {f}{'(현행)' if f=='fisher' else ''} | {ps['mean_diff']:+.3f} | {ps['pos']}/{ps['n']} | {a if a is None else round(a,4)} | {pa['mean_diff']:+.3f} | {pa['pos']}/{pa['n']} | {b if b is None else round(b,4)} | {'✅' if win else '—'} |")
     L.append("")
-    L.append(f"> **두 단일(shape·amp) 모두 Holm-유의 상회 fusion: {len(both_win)}/{len(FUSIONS)} — {both_win}.** 이것이 \"기여는 브랜치이며 특정 퓨전 트릭이 아니다\"의 직접 증거.")
+    L.append(f"> 두 단일(shape·amp) 모두 Holm-유의 상회 fusion: {len(both_win)}/{len(FUSIONS)} — {both_win}. "
+             "정확한 결론: **sum/probability 계열 5개(equal-z·fisher·stouffer·hmp·ranksum)에서 shape 단독 대비 유의한 개선과 "
+             "amp 단독 대비 반복적인 수치 개선이 관찰됐으며, 상보성이 Fisher 하나에만 의존하지는 않았다. 다만 amp 단독 대비 통계적 유의성은 확인되지 않았다.**")
     L.append("")
 
     # 표 2: 하위군
@@ -200,7 +202,7 @@ def main():
     L.append("- 승격 기준 = (Holm 유의 우세) AND P-G2 3조건. 미충족 시 **Fisher-tail 유지 + 본 결과는 fusion 강건성 ablation으로 정리**.")
     L.append("")
     L.append(f"- **판정: Fisher-tail 유지.** Fisher 대비 Holm-유의 우세 fusion 없음(위 표), fisher가 전체 최상위(동률권 stouffer/hmp/ranksum). 승격 조건(다중비교+P-G2) 미충족.")
-    L.append("- **P-3 핵심 결론(정직 정리)**: sum/probability 계열(equal-z·fisher·stouffer·hmp·ranksum)은 **shape 단독을 Holm-유의 상회(+0.10~0.12, p≈0.01~0.03)**하나, **강한 amp 단독 대비는 수치상 +0.03~0.05·15~17/24 fold로 우세하되 Holm 보정 후 유의성 미확인(p≈0.4)**. 즉 두 단일을 \"모두 유의\" 상회하는 결합식은 없음(0/10).")
+    L.append("- **P-3 핵심 결론**: sum/probability 계열 5개(equal-z·fisher·stouffer·hmp·ranksum)에서 **shape 단독 대비 유의한 개선(+0.10~0.12, Holm p≈0.01~0.03)과 amp 단독 대비 반복적인 수치 개선(+0.03~0.05, 15~17/24 fold)**이 관찰됐으며, **상보성이 Fisher 하나에만 의존하지는 않았다. 다만 amp 단독 대비 통계적 유의성은 확인되지 않았다(Holm p≈0.4).**")
     L.append("- 그러나 **dual 이득은 하위군에 실재**: fisher는 amp 단독 대비 compositional 0.862→0.943·shape-sensitive 0.874→0.923로 뚜렷이 개선(overall은 amp가 이미 높아 순증분이 작게 보임). = 두 브랜치 결합이 특정 결함군에서 상보적.")
     L.append("- **강건성**: 위 5개 sum/prob 결합식이 동일 패턴(≈0.86~0.88, shape 유의 상회·amp 근소 우세)을 반복 → dual 이득은 **특정 퓨전 트릭이 아니라 결합 계열 전반에서 재현**(Fisher 고유 효과 아님).")
     L.append("- **실패 규칙의 원인**: tippett(min-p)·maxz는 fold마다 더 극단적인 **한쪽 branch만 강조**해 amp 단독에 미달; mahalanobis·gmm2는 **2-사이드 밀도**라 저score 정상까지 이상치로 몰아 정상 FPR 급등(0.44~0.62) → 이상탐지에 부적합.")

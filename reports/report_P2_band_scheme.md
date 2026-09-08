@@ -37,14 +37,17 @@
 ## 해석
 - **log가 linear를 큰 폭·고유의로 상회**: Fisher B 0.877 vs 0.800(+0.077), paired p=0.0002(Holm 0.0004), 24 fold 중 21 fold에서 우세.
   게다가 **seed std가 0.049→0.013으로 급감**(seed별 0.860~0.897 범위 vs linear 0.730~0.865) — 안정성도 크게 개선.
-- **모든 축에서 동시 개선(트레이드오프 없음)**: zero-support 0.778→0.855, compositional 0.866→0.943,
-  amp-sensitive 0.779→0.842, shape-sensitive 0.828→0.923. 고진폭 정상 FPR도 0.155→0.132 개선.
+- **모든 사전 지정 AUROC 하위군에서 개선(단 저진폭 정상 FPR은 악화)**: zero-support 0.778→0.855, compositional 0.866→0.943,
+  amp-sensitive 0.779→0.842, shape-sensitive 0.828→0.923. 고진폭 정상 FPR도 0.155→0.132 개선. **단 저진폭 정상 FPR은 0.418→0.458로 악화**(확정 limitation 축, AUROC엔 부차).
 - **[가설] 메커니즘**: 로그 밴드는 저주파(31~1000 Hz)에 3밴드를 배치해, EDA에서 train-normal PSD 에너지의
   ~47~58%가 몰려 있던 저대역의 **조건부 진폭 해상도**를 높인다. 고주파는 넓게 묶어 잡음 밴드의 SNR 저하를 피함.
   (log는 **데이터 무의존 고정 경계**라 누수·과적합 여지 없음 — 단순 재가중.)
 - **energy는 linear와 사실상 동률**(-0.011, p=0.75 비유의): fold별 적응 경계가 여기선 이득 없음. adaptive라고 나은 게 아님.
 - **잔존 약점**: 저진폭 정상 FPR log 0.458 > linear 0.418(+0.04, 확정 limitation 축). 단 AUROC가 primary이고
   고진폭 FPR은 오히려 개선 → 순효과는 명확히 log 우위. (저진폭 FPR은 G-7에서 임계값 무관 구조적 한계로 종료된 축.)
+
+### 저진폭 정상 FPR paired 일관성 (기존 캐시, 추가 학습 없음)
+24-fold seed평균 저진폭 정상 FPR paired(log vs linear): Fisher(B) log 0.458 vs linear 0.418, mean_diff +0.039, 15/9 fold, **Wilcoxon p=0.14(비유의)**; equal-z(A) +0.026, 13/11, p=0.39. → 저진폭 FPR 악화는 **평균 이동 수준이며 fold 일관성은 약함**(AUROC 이득 p=0.0002와 대조). 확정 limitation 축(G-7)이라 승격 게이트로 삼지 않음.
 
 ## scheme 결정 (사전 고정 P-G2)
 채택 조건 = (1) 전체 AUROC 우위 > seed std · (2) zero-support/compositional 양쪽 비열위 · (3) amp/shape-sensitive 양쪽 비열위 — 3개 동시.

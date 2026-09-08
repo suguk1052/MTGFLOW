@@ -61,6 +61,11 @@ parser.add_argument('--amp_branch_hidden', type=int, default=None,
 # 작업 G-3a(band amplitude): 학습 checkpoint와 일치해야 함. 미지정 시 checkpoint 값 복원.
 parser.add_argument('--amp_n_bands', type=int, default=None,
                     help='작업 G-3a: amplitude target band 수. 미지정 시 checkpoint 값으로 복원.')
+# 작업 P-2(밴드 분할 방식): 학습과 일치해야 함. 미지정 시 checkpoint 값 복원(구 ckpt는 linear).
+parser.add_argument('--amp_band_scheme', type=str, default=None, choices=['linear', 'log', 'energy'],
+                    help='작업 P-2: band 분할 방식. 미지정 시 checkpoint 값으로 복원(구 ckpt=linear).')
+parser.add_argument('--amp_band_min_width', type=int, default=None,
+                    help='작업 P-2: energy 분할 최소 band 폭 가드. 미지정 시 checkpoint 값으로 복원.')
 # 작업 E(order tracking): 학습과 일치해야 함. 미지정 시 checkpoint 값으로 복원.
 #   단, order tracking은 test-time 변환으로도 독립 적용 가능(023→1은 source identity라 학습 무관).
 parser.add_argument('--order_track', action='store_true',
@@ -167,6 +172,8 @@ def build_paderborn_metadata(args):
         'amp_branch_hidden': int(args.amp_branch_hidden) if getattr(args, 'amp_branch_hidden', None) is not None else 32,
         # 작업 G-3a(band amplitude)
         'amp_n_bands': int(getattr(args, 'amp_n_bands', 1) or 1),
+        # 작업 P-2(밴드 분할 방식)
+        'amp_band_scheme': str(getattr(args, 'amp_band_scheme', 'linear') or 'linear'),
         'train_logrms_mean': float(getattr(args, 'train_logrms_mean', 0.0)),
         'train_logrms_std': float(getattr(args, 'train_logrms_std', 1.0)),
     }
@@ -226,6 +233,11 @@ def reconcile_paderborn_args_with_checkpoint(args, checkpoint):
     # 작업 G-3a: band 수 복원. 구 checkpoint(키 없음)는 1(=G-1 스칼라)로 하위호환.
     if args.amp_n_bands is None:
         args.amp_n_bands = int(metadata.get('amp_n_bands', 1))
+    # 작업 P-2: band 분할 방식 복원. 구 checkpoint(키 없음)는 linear로 하위호환.
+    if args.amp_band_scheme is None:
+        args.amp_band_scheme = metadata.get('amp_band_scheme', 'linear')
+    if args.amp_band_min_width is None:
+        args.amp_band_min_width = int(metadata.get('amp_band_min_width', 4))
     # 작업 E: order tracking 복원. --order_track를 CLI로 주면 test-time 적용(raw ckpt에도 독립 적용 가능),
     # 미지정 시 checkpoint 값(구 ckpt는 False). ref/ref_rpm도 CLI 우선, 미지정 시 metadata.
     if not option_was_provided('--order_track'):
@@ -336,6 +348,8 @@ def build_loaders(args):
             amp_normalize=args.amp_normalize,
             amp_normalize_channels=args.amp_normalize_channels if args.amp_normalize_channels is not None else 'all',
             amp_n_bands=int(getattr(args, 'amp_n_bands', 1) or 1),
+            amp_band_scheme=getattr(args, 'amp_band_scheme', None) or 'linear',
+            amp_band_min_width=int(getattr(args, 'amp_band_min_width', 4) or 4),
             rms_eps=args.rms_eps if args.rms_eps is not None else 1e-8,
             order_track=bool(getattr(args, 'order_track', False)),
             order_track_ref=getattr(args, 'order_track_ref', None) or 'nominal',
@@ -432,7 +446,8 @@ def warn_if_metadata_mismatch(checkpoint, reference_metadata):
     for key in ('load_setting', 'train_load_setting', 'test_load_setting', 'sensor_mode',
                 'train_ids', 'val_ids', 'test_norm_ids', 'window_size', 'stride_size',
                 'use_meta', 'meta_source', 'measured_meta_stats', 'meta_input_dim', 'meta_emb_dim', 'meta_inject',
-                'amp_normalize', 'amp_normalize_channels', 'rms_penalty', 'rms_eps', 'amp_branch', 'amp_n_bands'):
+                'amp_normalize', 'amp_normalize_channels', 'rms_penalty', 'rms_eps', 'amp_branch', 'amp_n_bands',
+                'amp_band_scheme'):
         if metadata.get(key) != reference_metadata.get(key):
             print(f"⚠️ Warning: seed checkpoint {key}={metadata.get(key)} differs from "
                   f"reference {key}={reference_metadata.get(key)}. 결과가 시드 간 비교 불가능할 수 있음.")

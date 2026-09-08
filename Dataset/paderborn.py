@@ -152,13 +152,12 @@ def summarize_measured_meta(op_signals, start, end, measured_meta_stats, vibrati
     return np.array([means[0], stds[0], means[1], stds[1], means[2], stds[2]], dtype=np.float32)
 
 
-def compute_band_rms(x, n_bands):
-    """작업 G-3a: 단일채널 window x(1D)를 rfft해 총 mean-square를 고정 K개 대역으로 분해,
-    대역별 RMS(=sqrt(대역 mean-square)) 벡터 (K,)를 반환한다.
+def compute_band_ms_per_bin(x):
+    """단일채널 window x(1D)를 rfft해 각 bin의 mean-square 기여 (F,)를 반환한다.
 
-    - 대역 경계: rfft bin(0..N/2)을 연속 K개 그룹으로 균등 분할(np.array_split). train/test 비의존 고정.
     - 실신호 한쪽 스펙트럼 파워 가중치(DC·Nyquist=1, 나머지=2)로 Parseval을 맞춰
-      Σ_k band_rms_k² = mean(x²) = (전대역 RMS)² 가 성립 → K=1이면 총 RMS와 일치.
+      Σ_bin ms_per_bin = mean(x²) = (전대역 RMS)² 가 성립.
+    - float64로 계산해 이후 band 합산이 기존 구현과 bit-identical하도록 한다.
     """
     x = np.asarray(x, dtype=np.float64).reshape(-1)
     N = len(x)
@@ -169,9 +168,129 @@ def compute_band_rms(x, n_bands):
     weights[0] = 1.0                     # DC
     if N % 2 == 0:
         weights[-1] = 1.0                # Nyquist(짝수 N에서만 존재)
-    ms_per_bin = weights * P / (N ** 2)  # 각 bin의 mean-square 기여
-    band_ms = np.array([ms_per_bin[g].sum() for g in np.array_split(np.arange(F), n_bands)])
+    return weights * P / (N ** 2)        # (F,) float64
+
+
+def band_rms_from_ms(ms_per_bin, boundaries):
+    """per-bin mean-square 기여(F,)를 주어진 band 그룹(boundaries)으로 합산해 band별 RMS (K,)를 반환.
+
+    boundaries = band별 rfft bin 인덱스 배열의 리스트(길이 K). 각 그룹의 mean-square 합의 sqrt.
+    boundaries가 rfft bin을 남김없이 분할하면 Σ_k band_rms_k² = 총 mean-square가 유지됨.
+    """
+    ms_per_bin = np.asarray(ms_per_bin, dtype=np.float64).reshape(-1)
+    band_ms = np.array([ms_per_bin[g].sum() for g in boundaries], dtype=np.float64)
     return np.sqrt(np.maximum(band_ms, 0.0)).astype(np.float32)  # (K,)
+
+
+def compute_band_rms(x, boundaries):
+    """작업 G-3a: 단일채널 window x(1D)를 주어진 band 그룹으로 분해해 band별 RMS (K,)를 반환.
+
+    작업 P-2: 기존 시그니처 compute_band_rms(x, n_bands)를 boundaries 기반으로 일반화.
+    boundaries = np.array_split(np.arange(F), n_bands)(=linear)이면 기존 결과와 bit-identical.
+    """
+    return band_rms_from_ms(compute_band_ms_per_bin(x), boundaries)
+
+
+# 작업 P-2(밴드 분할 방식): adaptive(energy)는 이 목록에 포함. 나머지(linear/log)는 데이터 무의존.
+_ADAPTIVE_BAND_SCHEMES = ('energy',)
+_SUPPORTED_BAND_SCHEMES = ('linear', 'log', 'energy')
+
+
+def _energy_edges_with_guard(psd, n_bands, F, min_width):
+    """train-normal 평균 PSD 누적 에너지의 1/n 분위로 band 경계(rfft bin)를 산출한다.
+
+    - DC(bin0) 제외하고 bin 1..F-1의 누적 에너지를 등분. 경계는 각 분위를 처음 넘는 bin.
+    - 최소폭 가드: 각 band의 (비-DC) bin 폭이 min_width 미만이면 좌→우, 우→좌 2패스로 보정.
+    - 반환: (edges(길이 n_bands+1, bin-index 공간 [1..F]), guard_triggered(bool)).
+    반환된 edges는 라벨/테스트 정보 없이 오직 train-normal PSD로만 결정된다(P-G3).
+    """
+    psd = np.asarray(psd, dtype=np.float64).reshape(-1)
+    if psd.shape[0] != F:
+        raise ValueError(f"energy scheme: psd 길이({psd.shape[0]}) != F({F})")
+    if F - 1 < n_bands * min_width:
+        raise ValueError(f"energy scheme: 비-DC bin({F-1})이 n_bands*min_width({n_bands*min_width})보다 작아 분할 불가.")
+    cum = np.cumsum(psd[1:])                       # bins 1..F-1 누적 (len F-1)
+    total = float(cum[-1]) if len(cum) else 0.0
+    edges = [1]
+    if total <= 0.0:                               # 전에너지 0(이론상 없음) → linear 폴백
+        edges = list(np.array_split(np.arange(1, F), n_bands)[i][0] for i in range(n_bands))
+        edges.append(F)
+    else:
+        for k in range(1, n_bands):
+            target = total * k / n_bands
+            j = int(np.searchsorted(cum, target, side='left'))  # cum[j] >= target
+            edges.append(min(j + 1, F))            # bin index(=j+1; cum[0]=bin1)
+        edges.append(F)
+    edges = [int(e) for e in edges]
+    raw_edges = list(edges)
+    # 최소폭 가드: 좌→우(아래에서 밀기)
+    for k in range(1, n_bands + 1):
+        if edges[k] < edges[k - 1] + min_width:
+            edges[k] = edges[k - 1] + min_width
+    edges[n_bands] = F
+    # 우→좌(위에서 당기기) — 좌패스로 상단이 F를 넘겼을 때 되돌림
+    for k in range(n_bands - 1, 0, -1):
+        if edges[k] > edges[k + 1] - min_width:
+            edges[k] = edges[k + 1] - min_width
+    if edges[0] != 1 or any(edges[k] < edges[k - 1] + min_width for k in range(1, n_bands + 1)):
+        raise ValueError(f"energy scheme: 최소폭 가드 후에도 경계 산출 실패 edges={edges}")
+    guard_triggered = (edges != raw_edges)
+    return np.array(edges, dtype=int), guard_triggered
+
+
+def compute_band_boundaries(F, n_bands, scheme='linear', psd=None, min_width=4, return_info=False):
+    """rfft bin(0..F-1)을 n_bands개 연속 그룹으로 나눈 인덱스 배열 리스트를 반환한다(작업 P-2).
+
+    scheme:
+      - 'linear': np.array_split(np.arange(F), n_bands). 기존 G-3a와 bit-identical.
+      - 'log'   : DC 제외, bin 1..F-1을 로그(상대) 등간격 경계로 분할(데이터 무의존).
+      - 'energy': psd(train-normal 평균 per-bin mean-square) 누적 에너지 1/n 분위 경계(DC 제외, 최소폭 가드).
+    DC(bin0)는 경계 산정에서 제외하되 첫 band에 귀속시켜 전대역 커버(Parseval 유지).
+    return_info=True면 (groups, info) 반환(info: edges·guard_triggered·scheme).
+    """
+    n_bands = int(n_bands)
+    scheme = str(scheme)
+    if scheme not in _SUPPORTED_BAND_SCHEMES:
+        raise ValueError(f"amp_band_scheme must be one of {_SUPPORTED_BAND_SCHEMES}, got {scheme!r}")
+    if scheme == 'linear':
+        groups = [g for g in np.array_split(np.arange(F), n_bands)]
+        info = {'scheme': scheme, 'edges': None, 'guard_triggered': False}
+        return (groups, info) if return_info else groups
+    # log/energy: bin-index 공간 [1..F]의 edges(길이 n_bands+1) → 그룹, DC는 첫 band에.
+    guard_triggered = False
+    if scheme == 'log':
+        edges = np.unique(np.round(np.geomspace(1, F, n_bands + 1)).astype(int))
+        # 중복 제거로 개수가 줄면 최소폭 1로 강제 확장
+        edges = _fix_monotone_edges(edges, F, n_bands, min_width=1)
+    elif scheme == 'energy':
+        if psd is None:
+            raise ValueError("energy scheme requires psd (train-normal 평균 per-bin mean-square).")
+        edges, guard_triggered = _energy_edges_with_guard(psd, n_bands, F, min_width)
+    groups = [np.arange(edges[k], edges[k + 1]) for k in range(n_bands)]
+    groups[0] = np.concatenate([np.array([0], dtype=int), groups[0]])  # DC를 첫 band에 귀속
+    info = {'scheme': scheme, 'edges': [int(e) for e in edges], 'guard_triggered': bool(guard_triggered)}
+    return (groups, info) if return_info else groups
+
+
+def _fix_monotone_edges(edges, F, n_bands, min_width=1):
+    """edges(bin-index)를 길이 n_bands+1, 시작 1·끝 F, 각 band 폭 ≥ min_width로 강제한다(log용)."""
+    edges = [int(e) for e in edges]
+    if not edges or edges[0] != 1:
+        edges = [1] + [e for e in edges if e > 1]
+    if edges[-1] != F:
+        edges = [e for e in edges if e < F] + [F]
+    # 개수 맞추기: 부족하면 선형 보간으로 채움
+    if len(edges) != n_bands + 1:
+        edges = list(np.linspace(1, F, n_bands + 1).round().astype(int))
+        edges[0], edges[-1] = 1, F
+    for k in range(1, n_bands + 1):
+        if edges[k] < edges[k - 1] + min_width:
+            edges[k] = edges[k - 1] + min_width
+    edges[n_bands] = F
+    for k in range(n_bands - 1, 0, -1):
+        if edges[k] > edges[k + 1] - min_width:
+            edges[k] = edges[k + 1] - min_width
+    return np.array(edges, dtype=int)
 
 
 class Paderborn_dataset(Dataset):
@@ -220,6 +339,8 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
                          amp_normalize=False,
                          amp_normalize_channels='all',
                          amp_n_bands=1,
+                         amp_band_scheme='linear',
+                         amp_band_min_width=4,
                          rms_eps=1e-8,
                          order_track=False,
                          order_track_ref='nominal',
@@ -254,10 +375,23 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
     if amp_normalize_channels not in ('all', 'vib_only'):
         raise ValueError("amp_normalize_channels must be one of ['all', 'vib_only']")
     # 작업 G-3a: amplitude target을 스칼라 log-RMS → 고정 K-band log-RMS 벡터로 확장.
-    # K=1이면 기존 G-1(스칼라)과 수치적으로 동일. band 경계는 rfft bin 균등 K분할(train/test 비의존 고정).
+    # K=1이면 기존 G-1(스칼라)과 수치적으로 동일.
+    # 작업 P-2: band 경계 산출 방식(amp_band_scheme). linear=기존 균등분할(bit-identical),
+    #   log=로그 상대경계(데이터 무의존), energy=fold별 train-normal 평균 PSD 누적 1/K 분위(누수 없음).
     amp_n_bands = int(amp_n_bands)
     if amp_n_bands < 1:
         raise ValueError("amp_n_bands must be a positive integer (>=1).")
+    amp_band_scheme = str(amp_band_scheme)
+    if amp_band_scheme not in _SUPPORTED_BAND_SCHEMES:
+        raise ValueError(f"amp_band_scheme must be one of {_SUPPORTED_BAND_SCHEMES}, got {amp_band_scheme!r}")
+    amp_band_min_width = int(amp_band_min_width)
+    # band F(rfft bin 수) 및 adaptive 여부. adaptive면 train-normal PSD로 경계를 fit(아래).
+    _band_F = int(window_size) // 2 + 1
+    _band_adaptive = amp_band_scheme in _ADAPTIVE_BAND_SCHEMES
+    # 비-adaptive(linear/log)는 데이터 무의존이라 미리 고정. adaptive는 train 추출 후 산출.
+    _band_boundaries = (None if (amp_n_bands <= 1 or _band_adaptive)
+                        else compute_band_boundaries(_band_F, amp_n_bands, amp_band_scheme,
+                                                     min_width=amp_band_min_width))
     if measured_meta_stats not in ('mean', 'meanstd'):
         raise ValueError("measured_meta_stats must be one of ['mean', 'meanstd']")
     meta_input_dim = 3 if meta_source == 'static' or measured_meta_stats == 'mean' else 6
@@ -374,7 +508,10 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
         extracted_ids = []
         extracted_metas = []
         extracted_rms = []  # 작업 D: window별 원 RMS(정규화 전, 비-z-score). 다채널이면 채널별 (C,)
-        extracted_band_rms = []  # 작업 G-3a: window별 ch0 band RMS(정규화 전) (K,). amp_n_bands==1이면 미사용.
+        # 작업 G-3a/P-2: band 모드 target. 비-adaptive(linear/log)는 확정 boundaries로 즉시 band RMS(K,).
+        #   adaptive(energy)는 경계가 train-normal에서 산출되므로 window별 ch0 ms_per_bin(F,)만 저장→사후 축약.
+        extracted_band_rms = []  # (K,)  비-adaptive band 모드
+        extracted_band_ms = []   # (F,)  adaptive band 모드(사후 boundaries로 축약)
         setting_window_counts = {}
         for folder_path, f in file_tuple_list:
             bearing_id = extract_bearing_id(f)
@@ -400,9 +537,12 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
                 #   all      → 전 채널 각자 RMS로 나눠 단위진폭(shape-only).
                 #   vib_only → 채널0(진동 Vy)만 정규화, 전류는 raw 진폭 보존(진폭 confound 노출용).
                 rms_vec = np.sqrt(np.mean(w ** 2, axis=0))  # (C,)
-                # 작업 G-3a: band 모드에서만 ch0 window의 대역별 RMS(정규화 전)를 계산해 target 벡터로 쓴다.
+                # 작업 G-3a/P-2: band 모드에서만 ch0 window(정규화 전)의 대역 target을 계산한다.
                 if amp_n_bands > 1:
-                    extracted_band_rms.append(compute_band_rms(w[:, 0], amp_n_bands))  # (K,)
+                    if _band_adaptive:
+                        extracted_band_ms.append(compute_band_ms_per_bin(w[:, 0]))  # (F,)
+                    else:
+                        extracted_band_rms.append(compute_band_rms(w[:, 0], _band_boundaries))  # (K,)
                 if amp_normalize:
                     if amp_normalize_channels == 'all':
                         w = w / (rms_vec + rms_eps)
@@ -428,26 +568,65 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
                 setting_window_counts[setting_name] = setting_window_counts.get(setting_name, 0) + 1
                 start += stride_size
                 
+        # 작업 P-2: band feature 폭. 비-adaptive는 (N,K) band RMS, adaptive는 (N,F) ms_per_bin(사후 축약).
+        _feat_width = _band_F if (amp_n_bands > 1 and _band_adaptive) else amp_n_bands
         if not extracted_windows:
             empty_w = (np.empty((0, window_size)) if n_channels == 1
                        else np.empty((0, window_size, n_channels)))
             empty_rms = (np.empty((0,), dtype=np.float32) if n_channels == 1
                          else np.empty((0, n_channels), dtype=np.float32))
-            empty_band_rms = np.empty((0, amp_n_bands), dtype=np.float32)
+            empty_feat = np.empty((0, _feat_width), dtype=np.float64)
             return (empty_w, np.array([], dtype=str),
                     np.empty((0, meta_input_dim), dtype=np.float32),
-                    empty_rms, empty_band_rms, setting_window_counts)
-        band_rms_arr = (np.array(extracted_band_rms, dtype=np.float32) if amp_n_bands > 1
-                        else np.empty((len(extracted_windows), amp_n_bands), dtype=np.float32))
+                    empty_rms, empty_feat, setting_window_counts)
+        if amp_n_bands > 1 and _band_adaptive:
+            band_feat_arr = np.array(extracted_band_ms, dtype=np.float64)   # (N,F) 사후 축약
+        elif amp_n_bands > 1:
+            band_feat_arr = np.array(extracted_band_rms, dtype=np.float32)  # (N,K) 확정 band RMS
+        else:
+            band_feat_arr = np.empty((len(extracted_windows), amp_n_bands), dtype=np.float32)
         return (np.array(extracted_windows), np.array(extracted_ids),
                 np.array(extracted_metas, dtype=np.float32),
-                np.array(extracted_rms, dtype=np.float32), band_rms_arr, setting_window_counts)
+                np.array(extracted_rms, dtype=np.float32), band_feat_arr, setting_window_counts)
 
     # 🚀 Step 4: 멀티 도메인 데이터셋 윈도우 가공 및 빌딩
     train_x, train_ids_per_window, train_meta, train_rms, train_band_rms, train_setting_counts = extract_scaled_windows(train_file_tuples)
     val_x, val_ids_per_window, val_meta, val_rms, val_band_rms, val_setting_counts = extract_scaled_windows(val_file_tuples)
     test_norm_x, test_norm_ids_per_window, test_norm_meta, test_norm_rms, test_norm_band_rms, test_norm_setting_counts = extract_scaled_windows(test_normal_file_tuples)
     test_fault_x, test_fault_ids_per_window, test_fault_meta, test_fault_rms, test_fault_band_rms, test_fault_setting_counts = extract_scaled_windows(test_fault_file_tuples)
+
+    # 작업 P-2: band 경계 확정. 비-adaptive(linear/log)는 이미 확정 boundaries로 band RMS(K,)를 담았다.
+    # adaptive(energy)는 여기서 fold별 train-normal 평균 PSD로 경계를 산출(val/test·fault·label 미사용, P-G3)한 뒤
+    # 저장해 둔 각 split의 ms_per_bin(F,)을 그 경계로 band RMS(K,)로 축약한다.
+    _band_boundaries_used = _band_boundaries
+    _band_edges_serial = None
+    if amp_n_bands > 1 and _band_adaptive:
+        if not len(train_band_rms):
+            raise ValueError("energy scheme: train-normal 윈도우가 비어 PSD 경계를 산출할 수 없음.")
+        train_psd_mean = np.asarray(train_band_rms, dtype=np.float64).mean(axis=0)  # (F,)
+        _band_boundaries_used, _info = compute_band_boundaries(
+            _band_F, amp_n_bands, amp_band_scheme, psd=train_psd_mean,
+            min_width=amp_band_min_width, return_info=True)
+        _band_edges_serial = _info.get('edges')
+        if _info.get('guard_triggered'):
+            print(f"⚠️ P-2 {amp_band_scheme} 최소폭 가드 발동: edges={_band_edges_serial} (min_width={amp_band_min_width})")
+
+        def _reduce_ms(ms_arr):
+            if not len(ms_arr):
+                return np.empty((0, amp_n_bands), dtype=np.float32)
+            return np.stack([band_rms_from_ms(row, _band_boundaries_used) for row in ms_arr]).astype(np.float32)
+
+        train_band_rms = _reduce_ms(train_band_rms)
+        val_band_rms = _reduce_ms(val_band_rms)
+        test_norm_band_rms = _reduce_ms(test_norm_band_rms)
+        test_fault_band_rms = _reduce_ms(test_fault_band_rms)
+    elif amp_n_bands > 1 and _band_boundaries_used is not None:
+        # linear/log: 노출용 edges 직렬화. log는 adaptive·EDA와 동일 관례([1..F], DC는 band0 암묵 소속)를
+        # 쓰도록 info["edges"]를 그대로 저장(관례 불일치 방지). linear는 edges=None이라 group 첫 bin+F로 대체.
+        _ns_groups, _ns_info = compute_band_boundaries(
+            _band_F, amp_n_bands, amp_band_scheme, min_width=amp_band_min_width, return_info=True)
+        _band_edges_serial = (_ns_info["edges"] if _ns_info["edges"] is not None
+                              else [int(g[0]) for g in _band_boundaries_used] + [int(_band_F)])
 
     test_x = np.concatenate([test_norm_x, test_fault_x], axis=0)
     test_ids_per_window = np.concatenate([test_norm_ids_per_window, test_fault_ids_per_window], axis=0)
@@ -583,6 +762,8 @@ def loader_Paderborn_OCC(root=_DATA_ROOT,
         ds.train_logrms_std = train_logrms_std
         ds.amp_normalize = bool(amp_normalize)
         ds.amp_n_bands = int(amp_n_bands)  # 작업 G-3a: main.py가 checkpoint metadata에 앵커로 저장
+        ds.amp_band_scheme = str(amp_band_scheme)  # 작업 P-2: 분할 방식(재현·dump 위생검증 노출)
+        ds.amp_band_edges = (list(_band_edges_serial) if _band_edges_serial is not None else None)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=not label)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)

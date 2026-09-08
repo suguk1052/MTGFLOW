@@ -13,6 +13,14 @@ from sklearn.metrics import roc_auc_score, precision_recall_curve
 # 실행 위치(cwd)와 무관하게 항상 올바른 경로를 가리킨다.
 _DATA_ROOT = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'Data', 'Paderborn'))
+# UODS-VAFDC(외부 검증) 데이터 위치.
+_UODS_DATA_ROOT = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', 'Data', 'UODS-VAFDC'))
+
+
+def is_occ_bearing(name):
+    """PU/UODS 공통 OCC(정상만 학습, val-loss 기준 checkpoint) 학습 경로 여부."""
+    return str(name).lower() in ('paderborn', 'uods')
 
 parser = argparse.ArgumentParser()
 
@@ -94,6 +102,8 @@ parser.add_argument('--train_ids', nargs='+', default=['K001', 'K002', 'K003'], 
 parser.add_argument('--val_ids', nargs='+', default=['K004'], help='Paderborn normal bearing IDs for validation.')
 parser.add_argument('--test_norm_ids', nargs='+', default=['K005', 'K006'], help='Paderborn normal bearing IDs for testing.')
 parser.add_argument('--exclude_ids', nargs='*', default=[], help='Paderborn bearing IDs to exclude from train, validation, and test splits.')
+parser.add_argument('--uods_split_manifest', type=str, default=None,
+                    help='UODS 외부 검증: bearing-wise split manifest(JSON) 경로. --name=uods 시 필수.')
 parser.add_argument('--seeds', type=int, nargs='+', default=[2026],
                     help='여러 시드 연달아 학습. run_name에 _s{seed} 자동 부착.')
 
@@ -203,11 +213,51 @@ def build_paderborn_metadata(args):
         'train_logrms_std': _logrms_stat_for_meta(getattr(args, 'train_logrms_std', 1.0)),
     }
 
+def build_uods_metadata(args):
+    """UODS 외부 검증용 checkpoint metadata. dump/model 복원이 쓰는 키는 PU와 동일하게 유지하되
+    split은 manifest 경로로 앵커한다(bearing-wise). test-side는 어떤 fit에도 미사용 — analysis에서 검증."""
+    return {
+        'dataset': 'uods',
+        'run_name': args.run_name,
+        'uods_split_manifest': args.uods_split_manifest,
+        'window_size': int(args.window_size),
+        'stride_size': int(args.stride_size),
+        'sampling_rate': float(args.sampling_rate),
+        # build_model(diagnose_G3a_amp_bands)이 참조하는 키(무-meta 고정)
+        'use_meta': False,
+        'meta_source': 'static',
+        'measured_meta_stats': args.measured_meta_stats,
+        'meta_input_dim': 3,
+        'meta_emb_dim': int(args.meta_emb_dim),
+        'meta_inject': args.meta_inject,
+        # 진폭·밴드(동결 파이프라인)
+        'amp_normalize': bool(args.amp_normalize),
+        'amp_normalize_channels': str(args.amp_normalize_channels),
+        'rms_lambda': float(args.rms_lambda),
+        'rms_penalty': args.rms_penalty,
+        'rms_eps': float(args.rms_eps),
+        'rms_feature': 'log_rms',
+        'amp_branch': bool(getattr(args, 'amp_branch', False)),
+        'amp_branch_hidden': int(getattr(args, 'amp_branch_hidden', 32)),
+        'amp_n_bands': int(getattr(args, 'amp_n_bands', 1)),
+        'amp_band_scheme': str(getattr(args, 'amp_band_scheme', 'linear')),
+        'amp_band_min_width': int(getattr(args, 'amp_band_min_width', 4)),
+        'amp_band_edges': (list(getattr(args, 'amp_band_edges', None)) if getattr(args, 'amp_band_edges', None) is not None else None),
+        'order_track': False,
+        'train_logrms_mean': _logrms_stat_for_meta(getattr(args, 'train_logrms_mean', 0.0)),
+        'train_logrms_std': _logrms_stat_for_meta(getattr(args, 'train_logrms_std', 1.0)),
+    }
+
+
 def resolve_save_path(args):
     if args.name.lower() == 'paderborn':
         if not args.run_name:
             raise ValueError('Paderborn training requires --run_name.')
         return os.path.join('results', 'Paderborn', args.run_name)
+    if args.name.lower() == 'uods':
+        if not args.run_name:
+            raise ValueError('UODS training requires --run_name.')
+        return os.path.join('results', 'UODS', args.run_name)
     return os.path.join(args.output_dir, args.name)
 
 
@@ -227,6 +277,12 @@ for seed in args.seeds:
         print(f"Mode: {paderborn_mode}")
         print(f"Train Settings: {train_settings}")
         print(f"Test Settings: {test_settings}")
+    elif args.name.lower() == 'uods':
+        if not args.run_name:
+            raise ValueError('UODS training requires --run_name.')
+        if not args.uods_split_manifest:
+            raise ValueError('UODS training requires --uods_split_manifest.')
+        print(f"UODS run_name: {args.run_name} | split manifest: {args.uods_split_manifest}")
     import random
     import numpy as np
     random.seed(args.seed)
@@ -296,6 +352,27 @@ for seed in args.seeds:
         # 작업 P-2: fold별 산출된 band 경계(edges)를 metadata에 앵커(재현·검증용).
         args.amp_band_edges = getattr(train_loader.dataset, 'amp_band_edges', None)
 
+    elif args.name.lower() == 'uods':
+        # UODS 외부 검증: 동결 파이프라인(band/scaler/z 규칙) 그대로, split만 manifest로 고정.
+        from Dataset.uods import loader_UODS_OCC
+        train_loader, val_loader, test_loader, n_sensor = loader_UODS_OCC(
+            root=_UODS_DATA_ROOT,
+            manifest=args.uods_split_manifest,
+            batch_size=args.batch_size,
+            window_size=args.window_size,
+            stride_size=args.stride_size,
+            amp_normalize=args.amp_normalize,
+            amp_normalize_channels=args.amp_normalize_channels,
+            amp_n_bands=args.amp_n_bands,
+            amp_band_scheme=args.amp_band_scheme,
+            amp_band_min_width=args.amp_band_min_width,
+            rms_eps=args.rms_eps,
+            sampling_rate=args.sampling_rate,
+        )
+        args.train_logrms_mean = getattr(train_loader.dataset, 'train_logrms_mean', 0.0)
+        args.train_logrms_std = getattr(train_loader.dataset, 'train_logrms_std', 1.0)
+        args.amp_band_edges = getattr(train_loader.dataset, 'amp_band_edges', None)
+
     # %%
     # 작업 G-1: amp_branch는 shape-only window(amp_normalize)를 전제로 함(진폭 정보 차단).
     if getattr(args, 'amp_branch', False) and not args.amp_normalize:
@@ -313,8 +390,8 @@ for seed in args.seeds:
     import matplotlib.pyplot as plt
     save_path = resolve_save_path(args)
     os.makedirs(save_path, exist_ok=True)
-    if args.name.lower() == 'paderborn':
-        print(f"Saving Paderborn model to {os.path.join(save_path, 'model.pth')}")
+    if is_occ_bearing(args.name):
+        print(f"Saving {args.name} model to {os.path.join(save_path, 'model.pth')}")
 
 
     loss_best = np.inf
@@ -329,7 +406,7 @@ for seed in args.seeds:
 
     # 관찰용 학습 로그(Paderborn 전용): 매 epoch train/val loss(+옵션 test AUROC)를
     # 구조화된 jsonl로 저장. checkpoint 선택/학습 결과에는 영향 없음(순수 기록용).
-    train_log_path = os.path.join(save_path, 'train_log.jsonl') if args.name.lower() == 'paderborn' else None
+    train_log_path = os.path.join(save_path, 'train_log.jsonl') if is_occ_bearing(args.name) else None
     if train_log_path and os.path.exists(train_log_path):
         os.remove(train_log_path)
 
@@ -360,7 +437,7 @@ for seed in args.seeds:
 
 
 
-        if args.name.lower() == 'paderborn':
+        if is_occ_bearing(args.name):
             loss_val = []
             model.eval()
             with torch.no_grad():
@@ -396,11 +473,12 @@ for seed in args.seeds:
 
             if loss_best > mean_val_loss:
                 loss_best = mean_val_loss
+                _ckpt_meta = build_uods_metadata(args) if args.name.lower() == 'uods' else build_paderborn_metadata(args)
                 torch.save({
                     'model': model.state_dict(),
                     'run_name': args.run_name,
                     'args': vars(args),
-                    'paderborn_metadata': build_paderborn_metadata(args),
+                    'paderborn_metadata': _ckpt_meta,
                 }, os.path.join(save_path, 'model.pth'))
 
             if train_log_path:

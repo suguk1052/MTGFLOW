@@ -71,3 +71,43 @@ conda run -n mtgflow python analysis/report_B1_classical.py    # → reports/rep
 1. 124잡 전량 완료 확인(`squeue -u dyhwang`, npz 개수 PU 288 / UODS 1200).
 2. `analysis/report_B1_classical.py` 실행 → `reports/report_B1_classical.md`(Table 4 전 열 + proposed/raw paired Wilcoxon·Holm(PU 24 fold)·paired(UODS 100 split)).
 3. `TODO.md` B-1 상태 갱신, 최종 커밋(push는 승인 후).
+
+---
+
+# B-2 Deep SVDD — 제출 상태 (진행 중, 2026-09-10)
+
+> 신규 파일만: `baselines/deep_svdd.py`(커밋 7e5a430), `runners/Paderborn/B2_deep_svdd/{b2_dispatch.sh,submit_b2_full.sh}`. B-1 파일 미수정.
+
+## 파일럿 (job 6219, n17 GPU) — GO
+- peak GPU **0.05GB**(V100-16 대비 무시 가능), host MaxRSS 8.5GB, 7.5분/fold.
+- collapse=**false**(전 지표 통과): emb_std 1.79e-3(>1e-3)·score_cv 1.17(>1e-2)·val_rank_ratio 6.29(>1.05). val_fpr 0.05. npz b3 스키마 정상.
+
+## 전량 제출 (2026-09-10 10:48:13 KST) — 24 fold × 5 seed = 120 GPU 잡
+| 배치 | job id | 노드 / array | 동시성 | 자원 |
+|---|---|---|---|---|
+| B-2 | **6221** | n17 / idx 0–59 | `%3` | `--gres=gpu:V100-16:1 --nv --cpus-per-task=4 --mem=12G` |
+| B-2 | **6222** | n16 / idx 60–119 | `%3` | 〃 |
+
+- index→(fold=idx//5, seed=2024+idx%5, split=SPLITS[fold//6]=[123to0,023to1,013to2,012to3], lono=fold%6+1). 파일럿 fold(012to3_LONO1_s2024) 스킵.
+- 산출: `results/Paderborn/b2_dsvdd_window_scores/<split>_LONO<n>_s<seed>.npz`(120, b3 스키마: te_f/va_f/tr_f=‖φ-c‖² 거리).
+
+## 관측 — B-2 co-scheduling 병목 (CPU–GPU affinity)
+- 제출 직후 B-2가 **노드당 1개만** RUNNING(나머지 `Resources` 대기), 자원 총량은 여유(n17 cpu 20/39·mem 92/123G·GPU 1/3 사용).
+- 원인 추정: 노드가 `Sockets=39, CoresPerSocket=1` 구조 → gres GPU가 특정 코어에 바인딩. B-1 CPU 잡(16코어/노드)이 2·3번 GPU 바인딩 코어를 점유하면 GPU가 free여도 할당 차단.
+- 영향: B-2 진행은 정상(npz 생성 중)이나 동시성이 6이 아닌 2 → **B-1 PU 종료로 코어가 풀리면 램프업 예상**. 모니터링 중.
+
+## 요건 반영 (사용자 지시)
+- **① OOM/메모리 폴백**: 현재 OOM/메모리 pending 없음(RAM 여유). 발생 시 `CONC=2 bash runners/Paderborn/B2_deep_svdd/submit_b2_full.sh`로 미완료 fold 재제출(deep_svdd.py 스킵). 폴백 발동 시 여기 기록.
+- **② fold별 collapse 지표**: 각 npz meta_json에 `collapse{emb_std,score_cv,val_rank_ratio,collapse,fails}` 기록 → 리포트에서 기준 미달 fold 수 집계·명시(하이퍼 불변).
+- **③ GPU peak·cudnn**: peak = fold 시작 `torch.cuda.reset_peak_memory_stats()` 후 `torch.cuda.max_memory_allocated()`(allocator peak, reserved 캐시 제외) → npz `peak_gpu_gb`. cudnn conv 비결정성으로 동일 seed GPU 재실행 시 미세차 가능 → `use_deterministic_algorithms` 미적용(속도), **5-seed 평균 보고**.
+
+## 자원 예약 방침 (사용자 피드백 반영)
+- 현 CPU 41%(16/39)는 코어 절약이 아니라 **B-1=RAM 바운드(20G/잡)·B-2=GPU 개수/affinity 바운드** 때문. 코어를 더 줘도 throughput 미상승.
+- 향후 CPU 바운드 배치: `--mem`을 실측 MaxRSS+여유로 타이트하게 + CPU 커널은 잡당 코어↑(IF n_jobs↑)로 fold 시간 단축.
+
+## 재현 명령
+```bash
+bash runners/Paderborn/B2_deep_svdd/submit_b2_full.sh          # %3
+CONC=2 bash runners/Paderborn/B2_deep_svdd/submit_b2_full.sh   # 메모리 폴백
+conda run -n mtgflow python baselines/deep_svdd.py --split 012to3 --lono 1 --seed 2024  # 단일 fold
+```

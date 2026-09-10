@@ -1,13 +1,13 @@
-# B-3. CATCH (재구성형 TSAD, ICLR'25) — 표 편입 (재사용 검증)
+# B-3. CATCH (재구성형 TSAD, ICLR'25) — 표 편입 + per-window 메타 복원
 
-B-0에서 checkpoint 규칙 = val-normal 재구성 loss 선택 확인(누수 0) → **재추론 불필요, metrics.json 재사용**.
-LOSO 24 fold × 5 seed = 120개 metrics.json의 `auroc` 집계. patch 64/64, seq_len 2048, K=1 채널.
+B-0 확인: checkpoint=val-normal 재구성 loss(누수 0) → 재추론 불필요. metrics.json `auroc` 집계 + **CATCH 로더 재실행(모델 없음)으로 per-window id·rms 복원**해 subgroup 열을 채움.
+**순서 일치 검증**: (count + test_labels array_equal) — 통과 120 / 실패 0 (fold×seed). patch 64/64, seq_len 2048, K=1 채널.
 
-## PU (24 LOSO fold) — Table 4 열
+## PU (24 LOSO fold) — Table 4 열 (seed 평균)
 
 | 모델 | overall | zero-support | compositional | amp-sensitive | shape-sensitive | 정상FPR고 | 정상FPR저 | ρ(RMS,score) |
 |---|---|---|---|---|---|---|---|---|
-| CATCH | 0.539±0.311 | 0.521±0.316 | 0.591±0.290 | —(CATCH per-window id·rms 없음) | —(CATCH per-window id·rms 없음) | —(CATCH per-window id·rms 없음) | —(CATCH per-window id·rms 없음) | —(CATCH per-window id·rms 없음) |
+| CATCH | 0.539±0.311 | 0.521±0.316 | 0.591±0.290 | 0.712 | 0.308 | 0.428±0.467 | 0.025±0.022 | 0.963±0.038 |
 | raw MTGFlow (참조) | 0.696 | | | | | | | |
 | 제안 N6+log+Fisher (참조) | 0.877 | | | | | | | |
 
@@ -17,9 +17,9 @@ LOSO 24 fold × 5 seed = 120개 metrics.json의 `auroc` 집계. patch 64/64, seq
 | vs raw MTGFlow | -0.158 | 0.000 | 2/24 |
 | vs 제안(Fisher) | -0.338 | 0.001 | 6/24 |
 
-## 한계·각주 (B-G1/B-G2)
-- **—(CATCH per-window id·rms 없음)**: CATCH `scores.npz`는 point-level(299,521 등)이고 window별 bearing id·RMS를 저장하지 않아 subgroup(amp/shape-sensitive)·진폭군 정상 FPR·ρ(RMS,score) 열은 산출 불가. 행은 유지하고 사유 표기(삭제 금지).
-- **프레이밍(B-G2)**: CATCH는 표준 재구성형 TSAD 설계의 참고 행. ① 시점 단위 탐지용 설계 ② K=1 채널이라 채널 간 융합 비활성 ③ seq_len 2048 제약. '우세' 주장 대상 아님.
-- 표값 = LOSO 0.539(24셀×5seed). B2 pooled(0.524)는 표 미사용.
+## 각주 (B-G1/B-G2)
+- **정상 pool 차이**: CATCH scores.npz에 train score 없음 → 진폭군 정상 FPR·ρ의 정상 pool = **val + test-normal**(제안/B-1은 train+val+test-normal). amp/shape-sensitive는 test-normal을 음성으로 쓰므로 영향 없음.
+- **정정**: CATCH LOSO scores.npz는 window-level(= n_test)로 확인 → id/rms 복원·정렬 검증 후 열 채움 완료.
+- **프레이밍(B-G2)**: CATCH는 표준 재구성형 TSAD 참고 행. ① 시점 단위 탐지용 설계 ② K=1 채널이라 채널 융합 비활성 ③ seq_len 2048 제약. '우세' 주장 대상 아님. 표값 = LOSO 0.539(B2 pooled 0.524는 표 미사용).
 
-> analysis-only. 재추론·모델 변경 없음.
+> analysis-only. 재추론·모델 변경 없음. 복원은 CATCH 로더(동일 인자) 재실행으로 id/rms만 산출.

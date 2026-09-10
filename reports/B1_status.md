@@ -1,7 +1,9 @@
-# B-1 고전 baseline (IF · OC-SVM) — 제출 상태 (진행 중)
+# B-1 고전 baseline (IF · OC-SVM) — ✅ 완료 (2026-09-10)
 
-> 브랜치 `claude/b-external-baselines`. CPU 전용(GPU 미사용). **집계·리포트·TODO 갱신은 124잡 전량 완료 후 별도 세션.**
-> 이 문서는 제출 시점 기록(재현·인수인계용).
+> 브랜치 `claude/b-external-baselines`. **B-1(124 CPU잡)·B-2(120 GPU잡) 전부 COMPLETED**(FAILED/OOM 0).
+> 리포트: `reports/report_B1_classical.md`(B-1)·`report_B2_deepsvdd.md`(B-2). 이 문서 = 제출·재현·인수인계 기록.
+>
+> **핵심 결과.** 6-log-band 특징 자체가 이득 대부분: OC-SVM·band PU **0.933**(제안 0.877 유의 상회, Holm p=0.006, 19/24)·UODS 0.882(제안 0.885 무승부); IF·band 0.882/0.875. raw 입력(IF 0.692·OC-SVM 0.603·Deep SVDD 0.645)은 raw MTGFlow 0.696 수준. B-2 collapse 미달 1/120.
 
 ## 제출 (2026-09-10 10:18:49 KST)
 

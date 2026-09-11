@@ -113,3 +113,9 @@ bash runners/Paderborn/B2_deep_svdd/submit_b2_full.sh          # %3
 CONC=2 bash runners/Paderborn/B2_deep_svdd/submit_b2_full.sh   # 메모리 폴백
 conda run -n mtgflow python baselines/deep_svdd.py --split 012to3 --lono 1 --seed 2024  # 단일 fold
 ```
+
+---
+
+# B-4 KAN-AD + 최종 Table 4 — ✅ 완료 (2026-09-11)
+- B-4 KAN-AD 120잡(6466/6467) 전부 COMPLETED. PU overall 0.870(제안 0.877 무승부, ρ 0.854·고진폭FPR 0.453로 진폭주도). 파일럿(6461) 통과·재시도 1회(torch.concat→cat). 리포트 `report_B4_kanad.md`.
+- 최종 통합 `reports/report_B_external_baselines.md`(PU 전 행·전 열 + UODS 표). **B 트랙 종료.**
